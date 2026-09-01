@@ -35,10 +35,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # TeamSpeak protocol (tsclientlib)
-tsclientlib = { git = "https://github.com/ReSpeak/tsclientlib.git" }
-tsproto = { git = "https://github.com/ReSpeak/tsclientlib.git" }
-tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib.git" }
-tsproto-types = { git = "https://github.com/ReSpeak/tsclientlib.git" }
+# Pinned: hickory 0.26 (DNS, from 04aa249) crashes on Android during domain
+# resolution; 3fbfa26 is the last revision with the working hickory 0.24 stack.
+tsclientlib = { git = "https://github.com/ReSpeak/tsclientlib.git", rev = "3fbfa26ead0d3e5b38288b55abe3e2d636a97115" }
+tsproto = { git = "https://github.com/ReSpeak/tsclientlib.git", rev = "3fbfa26ead0d3e5b38288b55abe3e2d636a97115" }
+tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib.git", rev = "3fbfa26ead0d3e5b38288b55abe3e2d636a97115" }
+tsproto-types = { git = "https://github.com/ReSpeak/tsclientlib.git", rev = "3fbfa26ead0d3e5b38288b55abe3e2d636a97115" }
 
 # Audio
 opus = "0.3"

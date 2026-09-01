@@ -7,7 +7,7 @@ use crate::config::ClientConfig;
 use crate::connection::ConnectionState;
 use crate::error::{ConnectionError, Error, Result};
 use crate::events::{AudioCodec, Event, EventHandler};
-use crate::state::{Channel, ServerState, User};
+use crate::state::{Channel, ServerInfo, ServerState, User};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -286,6 +286,13 @@ impl Client {
         // Synchronize full state from server
         self.sync_state()?;
 
+        // Ask the server to push current variable values (client/channel
+        // counts, uptime) via notifyserverupdated. Not critical — a failure
+        // only means those values stay at their defaults.
+        if let Err(e) = self.send_server_variables() {
+            warn!("Failed to request server variables: {}", e);
+        }
+
         // Emit connected event
         let _ = self.event_tx.send(Event::Connected {
             server_name: self.server_state.server.name.clone(),
@@ -327,6 +334,31 @@ impl Client {
             .map_err(|e| Error::Internal(e.to_string()))?;
 
         debug!("Subscribed to all channels");
+        Ok(())
+    }
+
+    /// Request the current server variables
+    ///
+    /// The server answers with a `notifyserverupdated`, which tsclientlib
+    /// stores in `state.server.optional_data` (clients_online,
+    /// channels_online, uptime). Without this request those values are
+    /// never populated.
+    pub fn send_server_variables(&mut self) -> Result<()> {
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or(ConnectionError::NotConnected)?;
+
+        let cmd = OutCommand::new(
+            Direction::C2S,
+            Flags::empty(),
+            PacketType::Command,
+            "servergetvariables",
+        );
+
+        cmd.send(con).map_err(|e| Error::Internal(e.to_string()))?;
+
+        debug!("Requested server variables");
         Ok(())
     }
 
@@ -882,6 +914,33 @@ impl Client {
     /// Get a snapshot of the server state
     pub fn server_state(&self) -> &ServerState {
         &self.server_state
+    }
+
+    /// Build a ServerInfo snapshot from the live tsclientlib state
+    ///
+    /// `clients_online`, `channels_online` and `uptime` only exist in the
+    /// book's `optional_data`, which the server pushes via
+    /// `notifyserverupdated` after `send_server_variables()`. Falls back to
+    /// the cached `server_state` when not connected.
+    pub fn server_info(&self) -> ServerInfo {
+        let mut info = self.server_state.server.clone();
+        if let Some(con) = self.connection.as_ref() {
+            if let Ok(state) = con.get_state() {
+                let server = &state.server;
+                info.name = server.name.clone();
+                info.welcome_message = Some(server.welcome_message.clone());
+                info.platform = server.platform.clone();
+                info.version = server.version.clone();
+                info.max_clients = server.max_clients as u32;
+                info.icon_id = server.icon.0 as i64;
+                if let Some(opt) = &server.optional_data {
+                    info.clients_online = opt.client_count as u32;
+                    info.channels_online = opt.channel_count as u32;
+                    info.uptime = opt.uptime.whole_seconds().max(0) as u64;
+                }
+            }
+        }
+        info
     }
 
     /// Get all channels from tsclientlib state

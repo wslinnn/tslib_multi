@@ -365,8 +365,8 @@ pub extern "system" fn Java_dev_tslib_Client_nativeGetServerInfo(
     ptr: jlong,
 ) -> jobject {
     let handle = ptr_to_handle(ptr);
-    let info = &handle.client.server_state().server;
-    create_java_server_info(&mut env, info).into_raw()
+    let info = handle.client.server_info();
+    create_java_server_info(&mut env, &info).into_raw()
 }
 
 /// `Client.sendServerMessage(msg)`
