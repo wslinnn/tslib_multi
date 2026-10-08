@@ -1,0 +1,78 @@
+name: Android native release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build and publish libtslib_jni.so
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # Uses the NDK preinstalled on GitHub runners; the glob fallback
+      # covers image layout changes
+      - name: Build
+        shell: bash
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+        run: |
+          if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+            ANDROID_NDK_HOME="$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)"
+          fi
+          export ANDROID_NDK_HOME
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
+          echo "Using NDK: $ANDROID_NDK_HOME"
+          cargo ndk \
+            -t arm64-v8a \
+            -t x86_64 \
+            -o dist/jniLibs \
+            build --release -p tslib-jni --features vendored-openssl -j4
+          ls -lh dist/jniLibs/*/libtslib_jni.so
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          cp dist/jniLibs/arm64-v8a/libtslib_jni.so libtslib_jni-arm64-v8a.so
+          cp dist/jniLibs/x86_64/libtslib_jni.so libtslib_jni-x86_64.so
+          sha256sum libtslib_jni-arm64-v8a.so libtslib_jni-x86_64.so > SHA256SUMS.txt
+          {
+            echo "## libtslib_jni Android 预编译库 \`${GITHUB_REF_NAME}\`"
+            echo
+            echo "构建自 commit \`${GITHUB_SHA}\`（tsclientlib 钉定 \`3fbfa26\` 稳定基线，含静态编译 OpenSSL）。"
+            echo
+            echo "### 使用"
+            echo "将对应 ABI 的库复制到应用工程 \`app/src/main/jniLibs/<abi>/libtslib_jni.so\`："
+            echo
+            echo "| 文件 | ABI |"
+            echo "|---|---|"
+            echo "| \`libtslib_jni-arm64-v8a.so\` | arm64-v8a |"
+            echo "| \`libtslib_jni-x86_64.so\` | x86_64 |"
+            echo
+            echo "### SHA256"
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+          } > release_body.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            libtslib_jni-arm64-v8a.so
+            libtslib_jni-x86_64.so
+            SHA256SUMS.txt
+          body_path: release_body.md
