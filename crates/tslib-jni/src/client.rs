@@ -445,7 +445,7 @@ pub extern "system" fn Java_dev_tslib_Client_nativeMoveToChannel(
 /// or null while not connected.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tslib_Client_nativeGetNetworkStats(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     ptr: jlong,
 ) -> jdoubleArray {
