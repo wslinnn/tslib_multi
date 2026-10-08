@@ -42,7 +42,7 @@ pub mod identity;
 pub mod state;
 
 // Re-exports
-pub use client::{Client, FileEntry};
+pub use client::{Client, FileEntry, NetworkStats};
 pub use config::ClientConfig;
 pub use connection::{Connection, ConnectionState};
 pub use error::{Error, Result};

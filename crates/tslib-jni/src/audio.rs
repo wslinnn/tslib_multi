@@ -1,5 +1,5 @@
 use jni::objects::{JByteArray, JClass, JValue};
-use jni::sys::jlong;
+use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
 
 use tslib_audio::codec::{Decoder, Encoder};
@@ -180,4 +180,43 @@ pub extern "system" fn Java_dev_tslib_OpusCodec_nativeGetConfig(
     )
     .map(|o| o.into_raw())
     .unwrap_or(std::ptr::null_mut())
+}
+
+/// `OpusCodec.setBitrate(bitrate)` — change the encoder bitrate at runtime
+/// (used by the adaptive audio loop to shed bitrate on weak networks).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_OpusCodec_nativeSetBitrate(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    bitrate: jint,
+) {
+    let handle = ptr_to_opus(ptr);
+    handle.config.bitrate = bitrate.max(0) as u32;
+    audio_to_jni_result(&mut env, handle.encoder.set_bitrate(bitrate.max(0) as u32));
+}
+
+/// `OpusCodec.setFec(enabled)` — toggle inband forward error correction.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_OpusCodec_nativeSetFec(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    enabled: jboolean,
+) {
+    let handle = ptr_to_opus(ptr);
+    audio_to_jni_result(&mut env, handle.encoder.set_fec(enabled != 0));
+}
+
+/// `OpusCodec.setExpectedPacketLoss(percent)` — tell the encoder which loss
+/// percentage to optimize its FEC redundancy for.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_OpusCodec_nativeSetExpectedPacketLoss(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    percent: jint,
+) {
+    let handle = ptr_to_opus(ptr);
+    audio_to_jni_result(&mut env, handle.encoder.set_expected_packet_loss(percent));
 }

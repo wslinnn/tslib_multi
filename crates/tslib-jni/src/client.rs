@@ -1,5 +1,5 @@
 use jni::objects::{JByteArray, JClass, JObject, JString, JValue};
-use jni::sys::{jboolean, jint, jlong, jobject, jobjectArray};
+use jni::sys::{jboolean, jint, jlong, jdoubleArray, jobject, jobjectArray};
 use jni::JNIEnv;
 
 use crate::error::{throw_tslib_exception, to_jni_result};
@@ -421,19 +421,57 @@ pub extern "system" fn Java_dev_tslib_Client_nativeSendPrivateMessage(
     );
 }
 
-/// `Client.moveToChannel(channelId)`
+/// `Client.moveToChannel(channelId, password)` — password may be null.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tslib_Client_nativeMoveToChannel(
     mut env: JNIEnv,
     _class: JClass,
     ptr: jlong,
     channel_id: jlong,
+    password: JString,
 ) {
+    let password = get_string(&mut env, &password);
     let handle = ptr_to_handle(ptr);
     to_jni_result(
         &mut env,
-        handle.client.move_to_channel(channel_id as u64),
+        handle
+            .client
+            .move_to_channel_with_password(channel_id as u64, password),
     );
+}
+
+/// `Client.getNetworkStats()` — returns `double[]` of
+/// `{rttMs, rttDevMs, packetLoss, packetLossIn, bytesRecvPerSec, bytesSentPerSec}`
+/// or null while not connected.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_Client_nativeGetNetworkStats(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jdoubleArray {
+    let handle = ptr_to_handle(ptr);
+    let Some(stats) = handle.client.get_network_stats() else {
+        return std::ptr::null_mut();
+    };
+
+    let values: [f64; 6] = [
+        stats.rtt_ms,
+        stats.rtt_dev_ms,
+        stats.packet_loss as f64,
+        stats.packet_loss_in as f64,
+        stats.bytes_received_per_sec as f64,
+        stats.bytes_sent_per_sec as f64,
+    ];
+
+    match env.new_double_array(values.len() as i32) {
+        Ok(arr) => {
+            if env.set_double_array_region(&arr, 0, &values).is_err() {
+                return std::ptr::null_mut();
+            }
+            arr.into_raw()
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// `Client.syncState()`

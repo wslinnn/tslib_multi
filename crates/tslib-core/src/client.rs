@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tsclientlib::prelude::*;
-use tsclientlib::{Connection as TsConnection, DisconnectOptions, InMessage, Reason, StreamItem, ClientId, ChannelId};
+use tsclientlib::{Connection as TsConnection, DisconnectOptions, InMessage, PacketStat, Reason, StreamItem, ClientId, ChannelId};
 use tsclientlib::MessageTarget as TsMessageTarget;
 use tsclientlib::data::{Client as TsClient, Channel as TsChannel};
 use tsclientlib::events::{Event as TsEvent, PropertyId};
@@ -32,6 +32,23 @@ pub struct FileEntry {
     pub size: u64,
     pub datetime: i64,
     pub is_file: bool,
+}
+
+/// A snapshot of connection quality metrics from the underlying UDP layer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetworkStats {
+    /// Smoothed round trip time in milliseconds.
+    pub rtt_ms: f64,
+    /// Round trip time deviation in milliseconds.
+    pub rtt_dev_ms: f64,
+    /// Average incoming+outgoing packet loss as a fraction (0.0–1.0).
+    pub packet_loss: f32,
+    /// Incoming (server→client) packet loss as a fraction (0.0–1.0).
+    pub packet_loss_in: f32,
+    /// Bytes received during the last second.
+    pub bytes_received_per_sec: u64,
+    /// Bytes sent during the last second.
+    pub bytes_sent_per_sec: u64,
 }
 
 /// The main TeamSpeak client
@@ -1001,6 +1018,31 @@ impl Client {
     /// Get a specific user
     pub fn user(&self, id: u16) -> Option<User> {
         self.server_state.users.get(&id).cloned()
+    }
+
+    /// Get current connection quality metrics (RTT, packet loss, bandwidth).
+    ///
+    /// Returns `None` while not connected to a server.
+    pub fn get_network_stats(&self) -> Option<NetworkStats> {
+        let con = self.connection.as_ref()?;
+        let stats = con.get_network_stats().ok()?;
+        // PacketStat order: InControl, InKeepalive, InSpeech,
+        // OutControl, OutKeepalive, OutSpeech
+        let last_second = stats.get_last_second_bytes();
+        let received: u32 = last_second[PacketStat::InControl as usize]
+            + last_second[PacketStat::InKeepalive as usize]
+            + last_second[PacketStat::InSpeech as usize];
+        let sent: u32 = last_second[PacketStat::OutControl as usize]
+            + last_second[PacketStat::OutKeepalive as usize]
+            + last_second[PacketStat::OutSpeech as usize];
+        Some(NetworkStats {
+            rtt_ms: stats.rtt.as_secs_f64() * 1000.0,
+            rtt_dev_ms: stats.rtt_dev.as_secs_f64() * 1000.0,
+            packet_loss: stats.get_packetloss(),
+            packet_loss_in: stats.get_packetloss_s2c_total(),
+            bytes_received_per_sec: received as u64,
+            bytes_sent_per_sec: sent as u64,
+        })
     }
 
     /// Move to a channel

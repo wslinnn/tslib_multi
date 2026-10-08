@@ -113,6 +113,25 @@ impl OpusEncoder {
         Ok(())
     }
 
+    /// Enable or disable inband forward error correction.
+    ///
+    /// FEC costs extra bitrate but lets the decoder reconstruct frames lost
+    /// in transit — worth enabling once real packet loss is observed.
+    pub fn set_fec(&mut self, enabled: bool) -> Result<()> {
+        self.inner
+            .set_inband_fec(enabled)
+            .map_err(|e| AudioError::Codec(format!("Failed to set FEC: {}", e)))?;
+        Ok(())
+    }
+
+    /// Set the expected packet loss percentage (0–100) the encoder optimizes for.
+    pub fn set_expected_packet_loss(&mut self, percent: i32) -> Result<()> {
+        self.inner
+            .set_packet_loss_perc(percent.clamp(0, 100))
+            .map_err(|e| AudioError::Codec(format!("Failed to set packet loss: {}", e)))?;
+        Ok(())
+    }
+
     /// Get expected packet size (estimate based on bitrate)
     pub fn packet_size(&self) -> usize {
         // Opus typically produces 20-200 bytes per 20ms frame at voice bitrates
