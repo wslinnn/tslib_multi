@@ -1165,6 +1165,25 @@ impl Client {
         Ok(())
     }
 
+    /// Send a poke to a user
+    pub fn send_poke(&mut self, user_id: u16, message: impl Into<String>) -> Result<()> {
+        let msg = message.into();
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or(ConnectionError::NotConnected)?;
+
+        debug!("Sending poke to {}: {}", user_id, msg);
+
+        con.get_state()
+            .map_err(|e| Error::Internal(e.to_string()))?
+            .send_message(TsMessageTarget::Poke(ClientId(user_id)), &msg)
+            .send(con)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
     /// Send audio data
     pub fn send_audio(&mut self, data: &[u8], codec: AudioCodec) -> Result<()> {
         let con = self

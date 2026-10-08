@@ -421,6 +421,26 @@ pub extern "system" fn Java_dev_tslib_Client_nativeSendPrivateMessage(
     );
 }
 
+/// `Client.sendPoke(userId, msg)`
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_Client_nativeSendPoke(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    user_id: jint,
+    msg: JString,
+) {
+    let msg = match require_string(&mut env, &msg) {
+        Ok(s) => s,
+        Err(()) => return,
+    };
+    let handle = ptr_to_handle(ptr);
+    to_jni_result(
+        &mut env,
+        handle.client.send_poke(user_id as u16, msg),
+    );
+}
+
 /// `Client.moveToChannel(channelId, password)` — password may be null.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tslib_Client_nativeMoveToChannel(
