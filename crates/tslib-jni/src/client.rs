@@ -1,4 +1,4 @@
-use jni::objects::{JByteArray, JClass, JObject, JString, JValue};
+use jni::objects::{JByteArray, JClass, JIntArray, JLongArray, JObject, JString, JValue};
 use jni::sys::{jboolean, jint, jlong, jdoubleArray, jobject, jobjectArray};
 use jni::JNIEnv;
 
@@ -715,4 +715,48 @@ pub extern "system" fn Java_dev_tslib_Client_nativeSendAudio(
     };
 
     to_jni_result(&mut env, handle.client.send_audio(&bytes, audio_codec));
+}
+
+/// `Client.setWhisperTargets(clients, channels)` — both arrays may be empty
+/// (whisper off). Null arrays are treated as empty.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_Client_nativeSetWhisperTargets(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    clients: JIntArray,
+    channels: JLongArray,
+) {
+    let handle = ptr_to_handle(ptr);
+
+    let client_ids: Vec<u16> = if clients.is_null() {
+        Vec::new()
+    } else {
+        match env.get_array_elements(&clients, jni::objects::ReleaseMode::Copy) {
+            Ok(arr) => arr.to_vec().into_iter().map(|v| v as u16).collect(),
+            Err(e) => {
+                throw_tslib_exception(&mut env, &format!("Failed to read whisper clients: {e}"));
+                return;
+            }
+        }
+    };
+
+    let channel_ids: Vec<u64> = if channels.is_null() {
+        Vec::new()
+    } else {
+        match env.get_array_elements(&channels, jni::objects::ReleaseMode::Copy) {
+            Ok(arr) => arr.to_vec().into_iter().map(|v| v as u64).collect(),
+            Err(e) => {
+                throw_tslib_exception(&mut env, &format!("Failed to read whisper channels: {e}"));
+                return;
+            }
+        }
+    };
+
+    to_jni_result(
+        &mut env,
+        handle
+            .client
+            .set_whisper_targets(client_ids, channel_ids),
+    );
 }

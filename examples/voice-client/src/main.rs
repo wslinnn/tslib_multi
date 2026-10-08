@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
                     Event::UserLeft { user, reason } => {
                         info!("[Leave] {} left: {}", user.nickname, reason);
                     }
-                    Event::TalkStatusStart { user_id } => {
+                    Event::TalkStatusStart { user_id, .. } => {
                         info!("[Talk] User {} started talking", user_id);
                     }
                     Event::TalkStatusStop { user_id } => {

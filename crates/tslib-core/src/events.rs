@@ -70,7 +70,7 @@ pub enum Event {
 
     // Talk events
     /// A user started talking
-    TalkStatusStart { user_id: u16 },
+    TalkStatusStart { user_id: u16, is_whisper: bool },
     /// A user stopped talking
     TalkStatusStop { user_id: u16 },
 
@@ -101,6 +101,8 @@ pub enum Event {
         user_id: u16,
         codec: AudioCodec,
         data: Vec<u8>,
+        /// True when the packet arrived as a whisper (VoiceWhisper) packet
+        is_whisper: bool,
     },
 
     // File transfer events

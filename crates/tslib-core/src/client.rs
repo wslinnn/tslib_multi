@@ -99,6 +99,11 @@ pub struct Client {
     /// Pending permoverview request: accumulates permission entries
     /// (channel_id, HashMap<permission_id, max_value>)
     pending_perm_overview: Option<(u64, HashMap<u32, i32>)>,
+    /// Active whisper targets. When non-empty, `send_audio` routes voice as
+    /// `C2SWhisper` to these targets instead of the current channel (TS3
+    /// semantics: whispering and channel talk are mutually exclusive).
+    whisper_clients: Vec<u16>,
+    whisper_channels: Vec<u64>,
 }
 
 impl Client {
@@ -125,6 +130,8 @@ impl Client {
             self_input_muted: None,
             pending_file_list: None,
             pending_perm_overview: None,
+            whisper_clients: Vec::new(),
+            whisper_channels: Vec::new(),
         };
 
         // Establish connection
@@ -405,9 +412,9 @@ impl Client {
             StreamItem::Audio(audio) => {
                 // Audio received - extract data from InAudioBuf
                 let audio_data = audio.data().data();
-                let (from_id, codec, data) = match audio_data {
-                    AudioData::S2C { from, codec, data, .. } => (*from, *codec, data),
-                    AudioData::S2CWhisper { from, codec, data, .. } => (*from, *codec, data),
+                let (from_id, codec, data, is_whisper) = match audio_data {
+                    AudioData::S2C { from, codec, data, .. } => (*from, *codec, data, false),
+                    AudioData::S2CWhisper { from, codec, data, .. } => (*from, *codec, data, true),
                     _ => return Vec::new(), // C2S packets should not be received
                 };
 
@@ -419,16 +426,17 @@ impl Client {
 
                 if !was_talking {
                     // Emit TalkStatusStart — both via broadcast AND in returned events
-                    let start_event = Event::TalkStatusStart { user_id: from_id };
+                    let start_event = Event::TalkStatusStart { user_id: from_id, is_whisper };
                     let _ = self.event_tx.send(start_event.clone());
                     events.push(start_event);
-                    debug!("User {} started talking", from_id);
+                    debug!("User {} started talking (whisper: {})", from_id, is_whisper);
                 }
 
                 let event = Event::AudioReceived {
                     user_id: from_id,
                     codec: codec_type_to_audio_codec(codec),
                     data: data.to_vec(),
+                    is_whisper,
                 };
                 let _ = self.event_tx.send(event.clone());
                 events.push(event);
@@ -1195,11 +1203,21 @@ impl Client {
             return Err(Error::Internal("Cannot send audio".to_string()));
         }
 
-        // Create audio packet using C2S format
-        let audio_data = AudioData::C2S {
-            id: self.audio_sequence,
-            codec: audio_codec_to_codec_type(codec),
-            data,
+        // Whisper mode: route to the explicit target set instead of the channel
+        let audio_data = if !self.whisper_clients.is_empty() || !self.whisper_channels.is_empty() {
+            AudioData::C2SWhisper {
+                id: self.audio_sequence,
+                codec: audio_codec_to_codec_type(codec),
+                channels: self.whisper_channels.clone(),
+                clients: self.whisper_clients.clone(),
+                data,
+            }
+        } else {
+            AudioData::C2S {
+                id: self.audio_sequence,
+                codec: audio_codec_to_codec_type(codec),
+                data,
+            }
         };
         self.audio_sequence = self.audio_sequence.wrapping_add(1);
 
@@ -1207,6 +1225,25 @@ impl Client {
         con.send_audio(packet)
             .map_err(|e| Error::Internal(e.to_string()))?;
 
+        Ok(())
+    }
+
+    /// Set the whisper target set. Voice captured afterwards is sent as
+    /// `C2SWhisper` packets to these clients/channels instead of the current
+    /// channel; passing two empty lists switches back to channel talk.
+    /// Targets are per-packet client/channel ids — resolve them from the
+    /// current user list at call time, they don't follow reconnects.
+    pub fn set_whisper_targets(&mut self, clients: Vec<u16>, channels: Vec<u64>) -> Result<()> {
+        self.whisper_clients = clients;
+        self.whisper_channels = channels;
+        if self.whisper_clients.is_empty() && self.whisper_channels.is_empty() {
+            debug!("Whisper mode off, back to channel talk");
+        } else {
+            debug!(
+                "Whisper mode on: clients={:?}, channels={:?}",
+                self.whisper_clients, self.whisper_channels
+            );
+        }
         Ok(())
     }
 

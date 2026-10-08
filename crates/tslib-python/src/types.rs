@@ -277,9 +277,10 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("user_id", user.id);
             let _ = dict.set_item("nickname", &user.nickname);
         }
-        Event::TalkStatusStart { user_id } => {
+        Event::TalkStatusStart { user_id, is_whisper } => {
             let _ = dict.set_item("type", "talk_status_start");
             let _ = dict.set_item("user_id", user_id);
+            let _ = dict.set_item("is_whisper", is_whisper);
         }
         Event::TalkStatusStop { user_id } => {
             let _ = dict.set_item("type", "talk_status_stop");
@@ -313,11 +314,12 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("user_id", user_id);
             let _ = dict.set_item("group_id", group_id);
         }
-        Event::AudioReceived { user_id, codec, data } => {
+        Event::AudioReceived { user_id, codec, data, is_whisper } => {
             let _ = dict.set_item("type", "audio_received");
             let _ = dict.set_item("user_id", user_id);
             let _ = dict.set_item("codec", codec.id());
             let _ = dict.set_item("data_len", data.len());
+            let _ = dict.set_item("is_whisper", is_whisper);
         }
         Event::FileDownloaded { channel_id, path, data } => {
             let _ = dict.set_item("type", "file_downloaded");

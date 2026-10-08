@@ -58,7 +58,7 @@ async fn main() {
                         Event::AudioReceived { .. } => {
                             // silent - too noisy
                         }
-                        Event::TalkStatusStart { user_id } => {
+                        Event::TalkStatusStart { user_id, .. } => {
                             println!("[TALK START] id={}", user_id);
                         }
                         Event::TalkStatusStop { user_id } => {

@@ -183,6 +183,19 @@ pub fn create_java_event<'a>(
         );
     };
 
+    let put_boolean = |env: &mut JNIEnv<'a>, map: &JObject<'a>, key: &str, val: bool| {
+        let k = env.new_string(key).unwrap();
+        let v = env
+            .new_object("java/lang/Boolean", "(Z)V", &[JValue::Bool(val as u8)])
+            .unwrap();
+        let _ = env.call_method(
+            map,
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[JValue::Object(&JObject::from(k)), JValue::Object(&v)],
+        );
+    };
+
     let event_type = match event {
         Event::Connected { server_name, welcome_message } => {
             put_string(env, &map, "server_name", server_name);
@@ -268,8 +281,9 @@ pub fn create_java_event<'a>(
             put_string(env, &map, "nickname", &user.nickname);
             "user_updated"
         }
-        Event::TalkStatusStart { user_id } => {
+        Event::TalkStatusStart { user_id, is_whisper } => {
             put_int(env, &map, "user_id", *user_id as i32);
+            put_boolean(env, &map, "is_whisper", *is_whisper);
             "talk_status_start"
         }
         Event::TalkStatusStop { user_id } => {
@@ -304,9 +318,10 @@ pub fn create_java_event<'a>(
             put_long(env, &map, "group_id", *group_id as i64);
             "server_group_removed"
         }
-        Event::AudioReceived { user_id, codec, data } => {
+        Event::AudioReceived { user_id, codec, data, is_whisper } => {
             put_int(env, &map, "user_id", *user_id as i32);
             put_int(env, &map, "codec", codec.id() as i32);
+            put_boolean(env, &map, "is_whisper", *is_whisper);
             // Put audio data as byte[]
             let byte_array = env.byte_array_from_slice(data).unwrap();
             let k = env.new_string("data").unwrap();
