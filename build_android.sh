@@ -7,7 +7,7 @@ set -euo pipefail
 # Usage: ./build_android.sh [--debug]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT_DIR="${SCRIPT_DIR}/../TS6_Droid/app/src/main/jniLibs"
+OUTPUT_DIR="${SCRIPT_DIR}/../TS6_Droid_CN/app/src/main/jniLibs"
 PROFILE="--release"
 
 if [[ "${1:-}" == "--debug" ]]; then
