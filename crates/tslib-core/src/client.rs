@@ -370,23 +370,34 @@ impl Client {
             .as_mut()
             .ok_or(ConnectionError::NotConnected)?;
 
+        // Hard bound: the embedding drives this on its single native thread —
+        // an unresponsive server must not pin that thread forever.
+        const CONNECT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + CONNECT_WAIT_TIMEOUT;
+
         // Poll events one by one without filtering, so we don't
         // discard non-BookEvents items (messages, audio, etc.)
         loop {
-            match con.events().next().await {
-                Some(Ok(item)) => {
+            match tokio::time::timeout(deadline, con.events().next()).await {
+                Ok(Some(Ok(item))) => {
                     if matches!(item, StreamItem::BookEvents(_)) {
                         break;
                     }
                     // Other events during connection setup are expected; just skip them
                 }
-                Some(Err(e)) => {
+                Ok(Some(Err(e))) => {
                     return Err(ConnectionError::ConnectFailed(e.to_string()).into());
                 }
-                None => {
+                Ok(None) => {
                     return Err(
                         ConnectionError::ConnectFailed("Connection closed".to_string()).into(),
                     );
+                }
+                Err(_elapsed) => {
+                    return Err(ConnectionError::ConnectFailed(
+                        "connect wait timed out".to_string(),
+                    )
+                    .into());
                 }
             }
         }

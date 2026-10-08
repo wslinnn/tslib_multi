@@ -8,9 +8,12 @@ use crate::{get_string, require_string};
 
 /// Internal handle that owns both the client and its tokio runtime.
 pub struct ClientHandle {
-    /// Destroy fence flag — set before the grace sleep in nativeDestroy so
+    /// Destroy fence flag — set before the grace wait in nativeDestroy so
     /// in-flight nativeWaitEvents calls can bail out early.
     pub destroyed: std::sync::atomic::AtomicBool,
+    /// Number of nativeWaitEvents calls currently blocked in native code.
+    /// nativeDestroy spins until this hits zero instead of guessing a delay.
+    pub in_flight_waits: std::sync::atomic::AtomicI32,
     /// Keeps the Java AudioSink object alive for as long as it is registered.
     pub audio_sink: std::sync::Mutex<Option<jni::objects::GlobalRef>>,
     pub client: tslib_core::Client,
@@ -92,6 +95,7 @@ pub extern "system" fn Java_dev_tslib_Client_nativeCreate(
 
     handle_to_ptr(ClientHandle {
         destroyed: std::sync::atomic::AtomicBool::new(false),
+        in_flight_waits: std::sync::atomic::AtomicI32::new(0),
         audio_sink: std::sync::Mutex::new(None),
         client,
         runtime,
@@ -106,14 +110,21 @@ pub extern "system" fn Java_dev_tslib_Client_nativeDestroy(
     ptr: jlong,
 ) {
     if ptr != 0 {
-        // Destroy fence: flag first, then let any in-flight nativeWaitEvents
-        // (bounded by its timeout + burst grace) return before the memory
-        // goes away. The sleep only reads the flag, never the client.
+        // Destroy fence: flag first, then spin until no nativeWaitEvents is
+        // in flight (bounded — a stuck pump must not hang the destroyer).
         let handle = ptr_to_handle(ptr);
         handle
             .destroyed
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        while handle
+            .in_flight_waits
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         unsafe {
             drop(Box::from_raw(ptr as *mut ClientHandle));
         }
@@ -254,10 +265,16 @@ pub extern "system" fn Java_dev_tslib_Client_nativeWaitEvents(
     if handle.destroyed.load(std::sync::atomic::Ordering::SeqCst) {
         return std::ptr::null_mut();
     }
-    let events = match handle
+    handle
+        .in_flight_waits
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let result = handle
         .runtime
-        .block_on(handle.client.wait_events(timeout_ms.max(1) as u64))
-    {
+        .block_on(handle.client.wait_events(timeout_ms.max(1) as u64));
+    handle
+        .in_flight_waits
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    let events = match result {
         Ok(evts) => evts,
         Err(e) => {
             throw_tslib_exception(&mut env, &e.to_string());
