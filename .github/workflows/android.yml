@@ -26,19 +26,20 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      - name: Set up Android NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27.2.12479018
-
-      # vendored OpenSSL needs perl+make+cmake — all present on ubuntu-latest
+      # vendored OpenSSL needs perl+make+cmake — all present on ubuntu-latest.
+      # Uses the NDK preinstalled on GitHub runners (ANDROID_NDK_HOME is set
+      # by the image); the glob fallback covers image layout changes.
       - name: Build
+        shell: bash
         env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ANDROID_NDK: ${{ steps.ndk.outputs.ndk-path }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: |
+          if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+            ANDROID_NDK_HOME="$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)"
+          fi
+          export ANDROID_NDK_HOME
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
+          echo "Using NDK: $ANDROID_NDK_HOME"
           cargo ndk \
             -t arm64-v8a \
             -t x86_64 \
