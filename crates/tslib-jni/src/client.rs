@@ -475,6 +475,19 @@ pub extern "system" fn Java_dev_tslib_Client_nativeGetNetworkStats(
     }
 }
 
+/// `Client.updateServerVariables()` — re-request server variables so the
+/// book's online counters and uptime stay current (the server only answers
+/// with a `notifyserverupdated` when asked).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_Client_nativeUpdateServerVariables(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) {
+    let handle = ptr_to_handle(ptr);
+    to_jni_result(&mut env, handle.client.send_server_variables());
+}
+
 /// `Client.syncState()`
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tslib_Client_nativeSyncState(
