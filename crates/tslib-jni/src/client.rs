@@ -441,7 +441,7 @@ pub extern "system" fn Java_dev_tslib_Client_nativeMoveToChannel(
 }
 
 /// `Client.getNetworkStats()` — returns `double[]` of
-/// `{rttMs, rttDevMs, packetLoss, packetLossIn, bytesRecvPerSec, bytesSentPerSec}`
+/// `{rttMs, rttDevMs, packetLoss, packetLossIn, bytesRecvPerSec, bytesSentPerSec, lossObservedTotal}`
 /// or null while not connected.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tslib_Client_nativeGetNetworkStats(
@@ -454,13 +454,14 @@ pub extern "system" fn Java_dev_tslib_Client_nativeGetNetworkStats(
         return std::ptr::null_mut();
     };
 
-    let values: [f64; 6] = [
+    let values: [f64; 7] = [
         stats.rtt_ms,
         stats.rtt_dev_ms,
         stats.packet_loss as f64,
         stats.packet_loss_in as f64,
         stats.bytes_received_per_sec as f64,
         stats.bytes_sent_per_sec as f64,
+        stats.loss_observed_total as f64,
     ];
 
     match env.new_double_array(values.len() as i32) {

@@ -41,7 +41,8 @@ pub struct NetworkStats {
     pub rtt_ms: f64,
     /// Round trip time deviation in milliseconds.
     pub rtt_dev_ms: f64,
-    /// Average incoming+outgoing packet loss as a fraction (0.0–1.0).
+    /// Average incoming+outgoing packet loss as a fraction (0.0–1.0),
+    /// cumulative since the connection was established.
     pub packet_loss: f32,
     /// Incoming (server→client) packet loss as a fraction (0.0–1.0).
     pub packet_loss_in: f32,
@@ -49,6 +50,10 @@ pub struct NetworkStats {
     pub bytes_received_per_sec: u64,
     /// Bytes sent during the last second.
     pub bytes_sent_per_sec: u64,
+    /// Cumulative packets observed by the loss accounting — same denominator
+    /// as `packet_loss`, so clients can derive recent-window loss by
+    /// differencing (`Δlost = loss·observed − prev_loss·prev_observed`).
+    pub loss_observed_total: u64,
 }
 
 /// The main TeamSpeak client
@@ -1035,6 +1040,12 @@ impl Client {
         let sent: u32 = last_second[PacketStat::OutControl as usize]
             + last_second[PacketStat::OutKeepalive as usize]
             + last_second[PacketStat::OutSpeech as usize];
+        // Same packet classes as get_packetloss()'s denominator:
+        // voice-in + ping/pong-in + ack-in + ack/command-out
+        let loss_observed = stats.total_packets[PacketStat::InSpeech as usize]
+            + stats.total_packets[PacketStat::InKeepalive as usize]
+            + stats.total_packets[PacketStat::InControl as usize]
+            + stats.total_packets[PacketStat::OutControl as usize];
         Some(NetworkStats {
             rtt_ms: stats.rtt.as_secs_f64() * 1000.0,
             rtt_dev_ms: stats.rtt_dev.as_secs_f64() * 1000.0,
@@ -1042,6 +1053,7 @@ impl Client {
             packet_loss_in: stats.get_packetloss_s2c_total(),
             bytes_received_per_sec: received as u64,
             bytes_sent_per_sec: sent as u64,
+            loss_observed_total: loss_observed,
         })
     }
 
