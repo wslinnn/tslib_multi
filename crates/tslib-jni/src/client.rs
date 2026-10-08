@@ -732,25 +732,37 @@ pub extern "system" fn Java_dev_tslib_Client_nativeSetWhisperTargets(
     let client_ids: Vec<u16> = if clients.is_null() {
         Vec::new()
     } else {
-        match env.get_array_elements(&clients, jni::objects::ReleaseMode::Copy) {
-            Ok(arr) => arr.to_vec().into_iter().map(|v| v as u16).collect(),
+        let len = match env.get_array_length(&clients) {
+            Ok(n) => n as usize,
             Err(e) => {
                 throw_tslib_exception(&mut env, &format!("Failed to read whisper clients: {e}"));
                 return;
             }
+        };
+        let mut buf = vec![0 as jint; len];
+        if let Err(e) = env.get_int_array_region(&clients, 0, &mut buf) {
+            throw_tslib_exception(&mut env, &format!("Failed to read whisper clients: {e}"));
+            return;
         }
+        buf.into_iter().map(|v| v as u16).collect()
     };
 
     let channel_ids: Vec<u64> = if channels.is_null() {
         Vec::new()
     } else {
-        match env.get_array_elements(&channels, jni::objects::ReleaseMode::Copy) {
-            Ok(arr) => arr.to_vec().into_iter().map(|v| v as u64).collect(),
+        let len = match env.get_array_length(&channels) {
+            Ok(n) => n as usize,
             Err(e) => {
                 throw_tslib_exception(&mut env, &format!("Failed to read whisper channels: {e}"));
                 return;
             }
+        };
+        let mut buf = vec![0 as jlong; len];
+        if let Err(e) = env.get_long_array_region(&channels, 0, &mut buf) {
+            throw_tslib_exception(&mut env, &format!("Failed to read whisper channels: {e}"));
+            return;
         }
+        buf.into_iter().map(|v| v as u64).collect()
     };
 
     to_jni_result(
