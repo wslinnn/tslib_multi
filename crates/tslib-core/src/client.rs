@@ -65,6 +65,13 @@ pub struct NetworkStats {
 /// Duration after which a user is considered to have stopped talking (ms)
 const TALK_TIMEOUT_MS: u128 = 300;
 
+/// After the first stream item, wait only this long for further items so a
+/// burst returns in one batch while the first frame never waits extra.
+const EVENT_BURST_GRACE_MS: u64 = 3;
+
+/// Upper bound on stream items processed per wait_events call.
+const MAX_STREAM_BURST: usize = 16;
+
 pub struct Client {
     /// The tsclientlib connection
     connection: Option<TsConnection>,
@@ -104,6 +111,10 @@ pub struct Client {
     /// semantics: whispering and channel talk are mutually exclusive).
     whisper_clients: Vec<u16>,
     whisper_channels: Vec<u64>,
+    /// Low-latency audio sink: when set, every received voice frame is
+    /// delivered synchronously on the pump thread instead of being emitted
+    /// as an `AudioReceived` event (which waits for the next event pull).
+    audio_sink: Option<Arc<dyn Fn(u16, &[u8], bool) + Send + Sync>>,
 }
 
 impl Client {
@@ -132,6 +143,7 @@ impl Client {
             pending_perm_overview: None,
             whisper_clients: Vec::new(),
             whisper_channels: Vec::new(),
+            audio_sink: None,
         };
 
         // Establish connection
@@ -243,6 +255,79 @@ impl Client {
         }
 
         Ok(events)
+    }
+
+    /// Block until at least one event is available or `timeout_ms` elapses.
+    ///
+    /// Latency-critical pump for the connection stream: the first item wakes
+    /// instantly on arrival (no polling interval), further items are only
+    /// coalesced for a short grace window so a burst returns in one batch.
+    /// This replaces sleep-then-poll loops on the embedding side.
+    pub async fn wait_events(&mut self, timeout_ms: u64) -> Result<Vec<Event>> {
+        let mut events = Vec::new();
+        let mut stream_items = Vec::new();
+        let mut disconnected = false;
+
+        {
+            let con = self
+                .connection
+                .as_mut()
+                .ok_or(ConnectionError::NotConnected)?;
+
+            let mut timeout = tokio::time::Duration::from_millis(timeout_ms.max(1));
+            loop {
+                match tokio::time::timeout(timeout, con.events().next()).await {
+                    Ok(Some(Ok(item))) => {
+                        stream_items.push(item);
+                        timeout = tokio::time::Duration::from_millis(EVENT_BURST_GRACE_MS);
+                        if stream_items.len() >= MAX_STREAM_BURST {
+                            break;
+                        }
+                    }
+                    Ok(Some(Err(e))) => {
+                        warn!("Event stream error: {}", e);
+                        break;
+                    }
+                    Ok(None) => {
+                        // Stream ended, connection closed
+                        disconnected = true;
+                        break;
+                    }
+                    Err(_) => break, // timed out — return what we have
+                }
+            }
+        }
+
+        for item in stream_items {
+            events.extend(self.process_stream_item(item).await);
+        }
+
+        if disconnected {
+            self.state = ConnectionState::Disconnected;
+            let event = Event::Disconnected {
+                reason: "Connection closed".to_string(),
+            };
+            let _ = self.event_tx.send(event.clone());
+            events.push(event);
+        }
+
+        let talk_stop_events = self.check_talk_timeouts();
+        events.extend(talk_stop_events);
+
+        for event in &events {
+            self.dispatch_event(event.clone()).await;
+        }
+
+        Ok(events)
+    }
+
+    /// Register the low-latency audio sink. Pass `None` to restore the
+    /// default `AudioReceived` event delivery.
+    pub fn set_audio_sink(
+        &mut self,
+        sink: Option<Arc<dyn Fn(u16, &[u8], bool) + Send + Sync>>,
+    ) {
+        self.audio_sink = sink;
     }
 
     /// Check for users who have stopped talking (no audio received recently)
@@ -432,14 +517,20 @@ impl Client {
                     debug!("User {} started talking (whisper: {})", from_id, is_whisper);
                 }
 
-                let event = Event::AudioReceived {
-                    user_id: from_id,
-                    codec: codec_type_to_audio_codec(codec),
-                    data: data.to_vec(),
-                    is_whisper,
-                };
-                let _ = self.event_tx.send(event.clone());
-                events.push(event);
+                // Hot path: deliver to the registered sink synchronously (no
+                // event round-trip); fall back to the event stream otherwise
+                if let Some(sink) = self.audio_sink.as_ref() {
+                    sink(from_id, data, is_whisper);
+                } else {
+                    let event = Event::AudioReceived {
+                        user_id: from_id,
+                        codec: codec_type_to_audio_codec(codec),
+                        data: data.to_vec(),
+                        is_whisper,
+                    };
+                    let _ = self.event_tx.send(event.clone());
+                    events.push(event);
+                }
                 events
             }
             StreamItem::DisconnectedTemporarily(_reason) => {

@@ -8,9 +8,18 @@ use crate::{get_string, require_string};
 
 /// Internal handle that owns both the client and its tokio runtime.
 pub struct ClientHandle {
+    /// Destroy fence flag — set before the grace sleep in nativeDestroy so
+    /// in-flight nativeWaitEvents calls can bail out early.
+    pub destroyed: std::sync::atomic::AtomicBool,
+    /// Keeps the Java AudioSink object alive for as long as it is registered.
+    pub audio_sink: std::sync::Mutex<Option<jni::objects::GlobalRef>>,
     pub client: tslib_core::Client,
     pub runtime: tokio::runtime::Runtime,
 }
+
+/// JavaVM handle captured on first use — needed to attach runtime worker
+/// threads when invoking the audio sink callback from Rust.
+static JAVA_VM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();
 
 fn ptr_to_handle(ptr: jlong) -> &'static mut ClientHandle {
     unsafe { &mut *(ptr as *mut ClientHandle) }
@@ -81,7 +90,12 @@ pub extern "system" fn Java_dev_tslib_Client_nativeCreate(
         }
     };
 
-    handle_to_ptr(ClientHandle { client, runtime })
+    handle_to_ptr(ClientHandle {
+        destroyed: std::sync::atomic::AtomicBool::new(false),
+        audio_sink: std::sync::Mutex::new(None),
+        client,
+        runtime,
+    })
 }
 
 /// `Client.nativeDestroy(ptr)` — free the client.
@@ -92,10 +106,88 @@ pub extern "system" fn Java_dev_tslib_Client_nativeDestroy(
     ptr: jlong,
 ) {
     if ptr != 0 {
+        // Destroy fence: flag first, then let any in-flight nativeWaitEvents
+        // (bounded by its timeout + burst grace) return before the memory
+        // goes away. The sleep only reads the flag, never the client.
+        let handle = ptr_to_handle(ptr);
+        handle
+            .destroyed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(200));
         unsafe {
             drop(Box::from_raw(ptr as *mut ClientHandle));
         }
     }
+}
+
+/// `Client.setAudioSink(sink)` — register a low-latency audio callback.
+/// `sink` may be null to unregister. The callback runs on Rust runtime
+/// worker threads; it must return quickly and must not call back into
+/// this client.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_Client_nativeSetAudioSink(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    sink: JObject,
+) {
+    let handle = ptr_to_handle(ptr);
+    let vm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(e) => {
+            throw_tslib_exception(&mut env, &format!("Failed to get JavaVM: {e}"));
+            return;
+        }
+    };
+    let _ = JAVA_VM.set(vm);
+
+    if sink.is_null() {
+        if let Ok(mut slot) = handle.audio_sink.lock() {
+            *slot = None;
+        }
+        handle.client.set_audio_sink(None);
+        return;
+    }
+
+    let global = match env.new_global_ref(&sink) {
+        Ok(g) => g,
+        Err(e) => {
+            throw_tslib_exception(&mut env, &format!("Failed to pin audio sink: {e}"));
+            return;
+        }
+    };
+    if let Ok(mut slot) = handle.audio_sink.lock() {
+        *slot = Some(global.clone());
+    }
+
+    handle.client.set_audio_sink(Some(std::sync::Arc::new(
+        move |user_id: u16, data: &[u8], is_whisper: bool| {
+            let Some(vm) = JAVA_VM.get() else { return };
+            let Ok(mut env) = vm.attach_current_thread_permanently() else {
+                return;
+            };
+            match env.byte_array_from_slice(data) {
+                Ok(arr) => {
+                    let _ = env.call_method(
+                        &global,
+                        "onAudioFrame",
+                        "(I[BZ)V",
+                        &[
+                            JValue::Int(user_id as i32),
+                            JValue::Object(&arr),
+                            JValue::Bool(is_whisper as u8),
+                        ],
+                    );
+                }
+                Err(e) => log::warn!("audio sink: byte[] creation failed: {e}"),
+            }
+            // A throwing callback must never corrupt the pump thread
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+                log::warn!("audio sink callback threw; exception cleared");
+            }
+        },
+    )));
 }
 
 /// `Client.waitConnected()`
@@ -146,6 +238,37 @@ pub extern "system" fn Java_dev_tslib_Client_nativeProcessEvents(
         }
     };
 
+    events_to_java_array(&mut env, events)
+}
+
+/// `Client.waitEvents(timeoutMs)` — blocks until events arrive or the
+/// timeout elapses; arrival wakes instantly (no polling interval).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_Client_nativeWaitEvents(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    timeout_ms: jint,
+) -> jobjectArray {
+    let handle = ptr_to_handle(ptr);
+    if handle.destroyed.load(std::sync::atomic::Ordering::SeqCst) {
+        return std::ptr::null_mut();
+    }
+    let events = match handle
+        .runtime
+        .block_on(handle.client.wait_events(timeout_ms.max(1) as u64))
+    {
+        Ok(evts) => evts,
+        Err(e) => {
+            throw_tslib_exception(&mut env, &e.to_string());
+            return std::ptr::null_mut();
+        }
+    };
+
+    events_to_java_array(&mut env, events)
+}
+
+fn events_to_java_array(env: &mut JNIEnv, events: Vec<tslib_core::Event>) -> jobjectArray {
     let event_class = match env.find_class("dev/tslib/Event") {
         Ok(c) => c,
         Err(_) => return std::ptr::null_mut(),
@@ -157,7 +280,7 @@ pub extern "system" fn Java_dev_tslib_Client_nativeProcessEvents(
     };
 
     for (i, event) in events.iter().enumerate() {
-        let obj = create_java_event(&mut env, event);
+        let obj = create_java_event(env, event);
         let _ = env.set_object_array_element(&array, i as i32, &obj);
     }
 
