@@ -387,7 +387,8 @@ mod tests {
         assert_eq!(unescape_team_speak_text("\\x673a\\x5668\\x4eba"), "机器人");
         // é zero-padded to 4 digits; ASCII stays raw
         assert_eq!(escape_team_speak_text("Aé"), "A\\x00e9");
-        assert_eq!(unescape_team_speak_text("\\x41\\x0062c"), "Abc");
+        assert_eq!(unescape_team_speak_text("A\\x00e9c"), "Aéc");
+        assert_eq!(unescape_team_speak_text("plain"), "plain");
         // Emoji: UTF-16 surrogate pair
         assert_eq!(escape_team_speak_text("😀"), "\\xd83d\\xde00");
         assert_eq!(unescape_team_speak_text("\\xd83d\\xde00"), "😀");
