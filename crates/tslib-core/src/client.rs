@@ -378,7 +378,7 @@ impl Client {
         // Poll events one by one without filtering, so we don't
         // discard non-BookEvents items (messages, audio, etc.)
         loop {
-            match tokio::time::timeout(deadline, con.events().next()).await {
+            match tokio::time::timeout_at(deadline, con.events().next()).await {
                 Ok(Some(Ok(item))) => {
                     if matches!(item, StreamItem::BookEvents(_)) {
                         break;
