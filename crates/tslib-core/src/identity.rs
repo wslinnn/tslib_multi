@@ -281,40 +281,36 @@ struct StoredIdentity {
 }
 
 /// Resolve the official `\xNNNN` escapes into text. The client escapes each
-/// character as `\x` + lowercase hex of its Unicode code point (e.g.
-/// `一` → `\x4e00`, an emoji as a UTF-16 surrogate pair `\xd83d\xde00`);
-/// hex digits are read greedily until the first non-hex byte.
+/// character as `\x` + exactly 4 lowercase hex digits of its UTF-16 code
+/// unit (e.g. `一` → `\x4e00`, é → `\x00e9`, an emoji as the surrogate
+/// pair `\xd83d\xde00`).
 fn unescape_team_speak_text(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = String::with_capacity(value.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'x') {
-            if let Some((code, consumed)) = parse_hex_codepoint(bytes, i + 2) {
-                // Combine a UTF-16 high surrogate with a following low one
-                if (0xd800..0xdc00).contains(&code) {
-                    if bytes.get(i + 2 + consumed) == Some(&b'\\')
-                        && bytes.get(i + 2 + consumed + 1) == Some(&b'x')
-                    {
-                        if let Some((low, consumed2)) =
-                            parse_hex_codepoint(bytes, i + 2 + consumed + 2)
-                        {
-                            if (0xdc00..0xe000).contains(&low) {
-                                if let Some(c) = char::from_u32(
-                                    0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00),
-                                ) {
-                                    out.push(c);
-                                    i += 2 + consumed + 2 + consumed2;
-                                    continue;
-                                }
+            if let Some(code) = parse_utf16_unit(bytes, i + 2) {
+                // Combine a high surrogate with a following low one
+                if (0xd800..0xdc00).contains(&code)
+                    && bytes.get(i + 6) == Some(&b'\\')
+                    && bytes.get(i + 7) == Some(&b'x')
+                {
+                    if let Some(low) = parse_utf16_unit(bytes, i + 8) {
+                        if (0xdc00..0xe000).contains(&low) {
+                            if let Some(c) = char::from_u32(
+                                0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00),
+                            ) {
+                                out.push(c);
+                                i += 12;
+                                continue;
                             }
                         }
                     }
                 }
-                if let Some(c) = char::from_u32(code) {
+                if let Some(c) = char::from_u32(code as u32) {
                     out.push(c);
-                    // The escape is `\x` + the digits we consumed
-                    i += 2 + consumed;
+                    i += 6;
                     continue;
                 }
             }
@@ -326,42 +322,23 @@ fn unescape_team_speak_text(value: &str) -> String {
     out
 }
 
-/// Parse up to 6 hex digits starting at `start`; returns the code point and
-/// the number of bytes consumed.
-fn parse_hex_codepoint(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
-    let mut code: u32 = 0;
-    let mut consumed = 0;
-    while consumed < 6 {
-        let Some(&b) = bytes.get(start + consumed) else { break };
-        let digit = match b {
-            b'0'..=b'9' => (b - b'0') as u32,
-            b'a'..=b'f' => (b - b'a' + 10) as u32,
-            b'A'..=b'F' => (b - b'A' + 10) as u32,
-            _ => break,
-        };
-        code = code * 16 + digit;
-        consumed += 1;
-    }
-    if consumed == 0 {
-        None
-    } else {
-        Some((code, consumed))
-    }
+/// Read exactly 4 hex digits (one UTF-16 code unit) starting at `start`.
+fn parse_utf16_unit(bytes: &[u8], start: usize) -> Option<u16> {
+    let hex = bytes.get(start..start + 4)?;
+    let text = std::str::from_utf8(hex).ok()?;
+    u16::from_str_radix(text, 16).ok()
 }
 
 /// Escape into the official form: every character outside printable ASCII
-/// (plus backslash and double quote) becomes `\x` + lowercase hex of its
-/// code point — `机器人` → `\x673a\x5668\x4eba`.
+/// (plus backslash and double quote) becomes `\x` + 4 lowercase hex digits
+/// of its UTF-16 code unit — `机器人` → `\x673a\x5668\x4eba`.
 fn escape_team_speak_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\x5c"),
-            '"' => out.push_str("\\x22"),
-            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
-                out.push_str(&format!("\\x{:x}", c as u32))
-            }
-            _ => out.push(c),
+    for unit in value.encode_utf16() {
+        match unit {
+            b @ (b'\\' | b'"') => out.push_str(if b == b'\\' { "\\x5c" } else { "\\x22" }),
+            0x20..=0x7e => out.push(unit as u8 as char),
+            _ => out.push_str(&format!("\\x{:04x}", unit)),
         }
     }
     out
@@ -401,11 +378,16 @@ mod tests {
 
     #[test]
     fn test_team_speak_escape_official_form() {
-        // The official client escapes code points, not UTF-8 bytes:
+        // The official client escapes UTF-16 code units, exactly 4 hex digits:
         // 机器人 = U+673A U+5668 U+4EBA → \x673a\x5668\x4eba
         assert_eq!(escape_team_speak_text("机器人"), "\\x673a\\x5668\\x4eba");
         assert_eq!(unescape_team_speak_text("\\x673a\\x5668\\x4eba"), "机器人");
-        assert_eq!(unescape_team_speak_text("\\x41\\x62c"), "Abc");
+        // é zero-padded to 4 digits; ASCII stays raw
+        assert_eq!(escape_team_speak_text("Aé"), "A\\x00e9");
+        assert_eq!(unescape_team_speak_text("\\x41\\x0062c"), "Abc");
+        // Emoji: UTF-16 surrogate pair
+        assert_eq!(escape_team_speak_text("😀"), "\\xd83d\\xde00");
+        assert_eq!(unescape_team_speak_text("\\xd83d\\xde00"), "😀");
     }
 
     #[test]
