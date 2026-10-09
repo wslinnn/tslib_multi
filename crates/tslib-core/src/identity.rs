@@ -298,9 +298,11 @@ fn unescape_team_speak_text(value: &str) -> String {
                 {
                     if let Some(low) = parse_utf16_unit(bytes, i + 8) {
                         if (0xdc00..0xe000).contains(&low) {
-                            if let Some(c) = char::from_u32(
-                                0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00),
-                            ) {
+                                if let Some(c) = char::from_u32(
+                                    0x10000u32
+                                        + ((code as u32 - 0xd800) << 10)
+                                        + (low as u32 - 0xdc00),
+                                ) {
                                 out.push(c);
                                 i += 12;
                                 continue;
