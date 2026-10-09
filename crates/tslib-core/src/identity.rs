@@ -336,7 +336,8 @@ fn escape_team_speak_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for unit in value.encode_utf16() {
         match unit {
-            b @ (b'\\' | b'"') => out.push_str(if b == b'\\' { "\\x5c" } else { "\\x22" }),
+            0x5c => out.push_str("\\x5c"),
+            0x22 => out.push_str("\\x22"),
             0x20..=0x7e => out.push(unit as u8 as char),
             _ => out.push_str(&format!("\\x{:04x}", unit)),
         }
