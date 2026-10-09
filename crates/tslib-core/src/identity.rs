@@ -280,38 +280,87 @@ struct StoredIdentity {
     nickname: Option<String>,
 }
 
-/// Resolve `\xNN` escapes (the official client escapes every non-ASCII byte
-/// and backslash this way) into UTF-8 text.
+/// Resolve the official `\xNNNN` escapes into text. The client escapes each
+/// character as `\x` + lowercase hex of its Unicode code point (e.g.
+/// `一` → `\x4e00`, an emoji as a UTF-16 surrogate pair `\xd83d\xde00`);
+/// hex digits are read greedily until the first non-hex byte.
 fn unescape_team_speak_text(value: &str) -> String {
     let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
+    let mut out = String::with_capacity(value.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'x') {
-            if let Some(hex) = bytes.get(i + 2..i + 4) {
-                if let Ok(b) = u8::from_str_radix(std::str::from_utf8(hex).unwrap_or(""), 16) {
-                    out.push(b);
-                    i += 4;
+            if let Some((code, consumed)) = parse_hex_codepoint(bytes, i + 2) {
+                // Combine a UTF-16 high surrogate with a following low one
+                if (0xd800..0xdc00).contains(&code) {
+                    if bytes.get(i + consumed) == Some(&b'\\')
+                        && bytes.get(i + consumed + 1) == Some(&b'x')
+                    {
+                        if let Some((low, consumed2)) =
+                            parse_hex_codepoint(bytes, i + consumed + 2)
+                        {
+                            if (0xdc00..0xe000).contains(&low) {
+                                if let Some(c) = char::from_u32(
+                                    0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00),
+                                ) {
+                                    out.push(c);
+                                    i += consumed + consumed2;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(c) = char::from_u32(code) {
+                    out.push(c);
+                    i += consumed;
                     continue;
                 }
             }
         }
-        out.push(bytes[i]);
-        i += 1;
+        let ch = value[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
-/// Escape into the official `\xNN` form: non-ASCII bytes, backslash and
-/// double quote become `\xNN`, other printable ASCII passes through.
+/// Parse up to 6 hex digits starting at `start`; returns the code point and
+/// the number of bytes consumed.
+fn parse_hex_codepoint(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
+    let mut code: u32 = 0;
+    let mut consumed = 0;
+    while consumed < 6 {
+        let Some(&b) = bytes.get(start + consumed) else { break };
+        let digit = match b {
+            b'0'..=b'9' => (b - b'0') as u32,
+            b'a'..=b'f' => (b - b'a' + 10) as u32,
+            b'A'..=b'F' => (b - b'A' + 10) as u32,
+            _ => break,
+        };
+        code = code * 16 + digit;
+        consumed += 1;
+    }
+    if consumed == 0 {
+        None
+    } else {
+        Some((code, consumed))
+    }
+}
+
+/// Escape into the official form: every character outside printable ASCII
+/// (plus backslash and double quote) becomes `\x` + lowercase hex of its
+/// code point — `机器人` → `\x673a\x5668\x4eba`.
 fn escape_team_speak_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
-    for b in value.as_bytes() {
-        match b {
-            b'\\' => out.push_str("\\x5c"),
-            b'"' => out.push_str("\\x22"),
-            0x20..=0x7e => out.push(*b as char),
-            _ => out.push_str(&format!("\\x{b:02x}")),
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\x5c"),
+            '"' => out.push_str("\\x22"),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                out.push_str(&format!("\\x{:x}", c as u32))
+            }
+            _ => out.push(c),
         }
     }
     out
@@ -347,6 +396,15 @@ mod tests {
         assert_eq!(identity.unique_id(), loaded.unique_id());
         assert_eq!(identity.key_offset(), loaded.key_offset());
         assert_eq!(loaded.nickname().as_deref(), Some("机器人"));
+    }
+
+    #[test]
+    fn test_team_speak_escape_official_form() {
+        // The official client escapes code points, not UTF-8 bytes:
+        // 机器人 = U+673A U+5668 U+4EBA → \x673a\x5668\x4eba
+        assert_eq!(escape_team_speak_text("机器人"), "\\x673a\\x5668\\x4eba");
+        assert_eq!(unescape_team_speak_text("\\x673a\\x5668\\x4eba"), "机器人");
+        assert_eq!(unescape_team_speak_text("\\x41\\x62c"), "Abc");
     }
 
     #[test]
