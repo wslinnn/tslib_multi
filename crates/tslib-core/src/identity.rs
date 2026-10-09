@@ -293,18 +293,18 @@ fn unescape_team_speak_text(value: &str) -> String {
             if let Some((code, consumed)) = parse_hex_codepoint(bytes, i + 2) {
                 // Combine a UTF-16 high surrogate with a following low one
                 if (0xd800..0xdc00).contains(&code) {
-                    if bytes.get(i + consumed) == Some(&b'\\')
-                        && bytes.get(i + consumed + 1) == Some(&b'x')
+                    if bytes.get(i + 2 + consumed) == Some(&b'\\')
+                        && bytes.get(i + 2 + consumed + 1) == Some(&b'x')
                     {
                         if let Some((low, consumed2)) =
-                            parse_hex_codepoint(bytes, i + consumed + 2)
+                            parse_hex_codepoint(bytes, i + 2 + consumed + 2)
                         {
                             if (0xdc00..0xe000).contains(&low) {
                                 if let Some(c) = char::from_u32(
                                     0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00),
                                 ) {
                                     out.push(c);
-                                    i += consumed + consumed2;
+                                    i += 2 + consumed + 2 + consumed2;
                                     continue;
                                 }
                             }
@@ -313,7 +313,8 @@ fn unescape_team_speak_text(value: &str) -> String {
                 }
                 if let Some(c) = char::from_u32(code) {
                     out.push(c);
-                    i += consumed;
+                    // The escape is `\x` + the digits we consumed
+                    i += 2 + consumed;
                     continue;
                 }
             }
