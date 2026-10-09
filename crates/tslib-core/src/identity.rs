@@ -132,7 +132,8 @@ impl Identity {
                 if raw.is_empty() || raw.contains('=') {
                     return Err(IdentityError::ImportFailed(
                         "no identity entry found".into(),
-                    ));
+                    )
+                    .into());
                 }
                 raw
             }
@@ -142,7 +143,7 @@ impl Identity {
             .find('V')
             .ok_or_else(|| IdentityError::ImportFailed("missing offset separator".into()))?;
         if separator == 0 || separator == value.len() - 1 {
-            return Err(IdentityError::ImportFailed("missing key after offset".into()));
+            return Err(IdentityError::ImportFailed("missing key after offset".into()).into());
         }
         let offset: u64 = value[..separator]
             .parse()
