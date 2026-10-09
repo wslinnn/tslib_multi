@@ -106,6 +106,28 @@ pub extern "system" fn Java_dev_tslib_Identity_nativeExportString(
     }
 }
 
+/// `Identity.exportTeamSpeakIni(label)` — official client ts.ini export.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_Identity_nativeExportTeamSpeakIni(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    label: JString,
+) -> jstring {
+    let label = match require_string(&mut env, &label) {
+        Ok(s) => s,
+        Err(()) => return std::ptr::null_mut(),
+    };
+    let id = ptr_to_identity(ptr);
+    match to_jni_result(&mut env, id.export_team_speak_ini(&label)) {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
 /// `Identity.getUniqueId()`
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tslib_Identity_nativeGetUniqueId(

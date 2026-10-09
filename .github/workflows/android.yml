@@ -26,6 +26,11 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
+      # Host unit tests (identity import/export roundtrip etc.) — pure Rust,
+      # runs on the ubuntu toolchain before the Android cross-build
+      - name: Run tslib-core tests
+        run: cargo test -p tslib-core --locked
+
       # vendored OpenSSL needs perl+make+cmake — all present on ubuntu-latest.
       # Uses the NDK preinstalled on GitHub runners (ANDROID_NDK_HOME is set
       # by the image); the glob fallback covers image layout changes.
