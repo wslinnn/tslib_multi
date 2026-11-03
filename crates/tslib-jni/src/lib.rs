@@ -3,6 +3,7 @@
 mod audio;
 mod bbcode;
 mod client;
+mod echo;
 mod error;
 mod identity;
 mod types;
