@@ -5,7 +5,7 @@
 //! - Speaker playback
 //! - Opus encoding/decoding
 //! - Audio mixing
-//! - Echo cancellation (planned)
+//! - Software echo cancellation (speexdsp-based)
 //!
 //! ## Example
 //!
@@ -30,6 +30,7 @@
 pub mod capture;
 pub mod codec;
 pub mod config;
+pub mod echo;
 pub mod error;
 pub mod manager;
 pub mod mixer;
@@ -38,5 +39,6 @@ pub mod playback;
 // Re-exports
 pub use codec::{Decoder, Encoder, OpusCodec};
 pub use config::AudioConfig;
+pub use echo::{EchoEngine, SpeexEchoEngine};
 pub use error::{AudioError, Result};
 pub use manager::AudioManager;

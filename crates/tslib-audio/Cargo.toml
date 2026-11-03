@@ -25,5 +25,9 @@ rubato.workspace = true
 # Ring buffer for audio
 ringbuf = "0.3"
 
+[build-dependencies]
+# Compiles the vendored speexdsp echo canceller (speexdsp/)
+cc = "1"
+
 [dev-dependencies]
 tracing-subscriber.workspace = true
