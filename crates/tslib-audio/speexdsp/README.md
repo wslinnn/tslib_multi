@@ -19,3 +19,8 @@ Only the files needed by the software echo canceller (`src/echo.rs`, the
 
 Build configuration (see `build.rs`): `-DFLOATING_POINT -DUSE_SMALLFT`.
 No upstream code is modified; configuration is done purely through defines.
+
+One generated file is replaced by a fixed stand-in:
+`include/speex/speexdsp_config_types.h` (upstream generates it from
+`speexdsp_config_types.h.in` at configure time; all platforms this crate
+targets use the standard fixed-width types — see the file header).

@@ -37,6 +37,7 @@ fn main() {
         "speexdsp/libspeexdsp/fixed_debug.h",
         "speexdsp/include/speex/speex_echo.h",
         "speexdsp/include/speex/speexdsp_types.h",
+        "speexdsp/include/speex/speexdsp_config_types.h",
     ] {
         println!("cargo:rerun-if-changed={}", file);
     }
