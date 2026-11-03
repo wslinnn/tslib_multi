@@ -14,6 +14,12 @@ jobs:
   build:
     name: Build libtslib_jni.so (arm64-v8a + x86_64)
     runs-on: ubuntu-latest
+    # Runner images moved to cmake 4.x, which rejects the vendored opus
+    # project's pre-3.5 cmake_minimum_required — needed by both the host
+    # test step (tsclientlib's default features pull audiopus) and the
+    # Android cross-build.
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
 
@@ -36,8 +42,6 @@ jobs:
       # by the image); the glob fallback covers image layout changes.
       - name: Build
         shell: bash
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: |
           if [ -z "${ANDROID_NDK_HOME:-}" ]; then
             ANDROID_NDK_HOME="$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)"
