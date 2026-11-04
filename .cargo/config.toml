@@ -1,5 +1,5 @@
 [target.aarch64-linux-android]
-linker = "aarch64-linux-android21-clang"
+linker = "aarch64-linux-android29-clang"
 # Static C++ runtime for the vendored AEC3 (tslib-audio-aec3). The NDK's
 # libc++.a is a thin archive, which rustc's rlib layer cannot ingest
 # (`Unsupported archive identifier`), so it is linked as a plain linker
@@ -12,5 +12,5 @@ rustflags = ["-C", "link-arg=-lc++"]
 linker = "armv7a-linux-androideabi21-clang"
 
 [target.x86_64-linux-android]
-linker = "x86_64-linux-android21-clang"
+linker = "x86_64-linux-android29-clang"
 rustflags = ["-C", "link-arg=-lc++"]

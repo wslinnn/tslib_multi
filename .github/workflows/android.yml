@@ -54,7 +54,7 @@ jobs:
           export ANDROID_NDK_HOME
           export ANDROID_NDK="$ANDROID_NDK_HOME"
           echo "Using NDK: $ANDROID_NDK_HOME"
-          cargo ndk \
+          cargo ndk --platform 29 \
             -t arm64-v8a \
             -t x86_64 \
             -o dist/jniLibs \

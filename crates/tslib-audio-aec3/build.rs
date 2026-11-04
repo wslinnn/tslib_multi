@@ -17,11 +17,15 @@
 //!   upstream `default_options` say c++17, which MSVC rejects for the
 //!   designated initializers in `input_volume_stats_reporter.cc`
 //!   (error C7555); GCC/Clang only accept it as a C++17 extension.
-//! - Static archives are passed to the linker as explicit full paths (not
-//!   `-lstatic` names): meson names MSVC archives `*.a`, which link.exe
-//!   would not resolve by search path, and full paths also let us wrap the
-//!   abseil set in `--start-group`/`--end-group` on ELF targets without
-//!   guessing a topological order.
+//! - Archives are linked by name (`rustc-link-lib=static=...` plus
+//!   `rustc-link-search`), the only primitives that propagate from a
+//!   dependency build script to downstream links. MSVC archives are staged
+//!   as `NAME.lib` because link.exe resolves nothing else; on ELF targets
+//!   each abseil archive is declared twice so a single-pass linker resolves
+//!   the inter-library cycles.
+//! - The Android C++ runtime (`libc++.a`, a thin archive the rlib layer
+//!   cannot ingest) is linked via `-C link-arg=-lc++` in
+//!   `.cargo/config.toml`, effective at the final cdylib link only.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -70,7 +74,7 @@ fn main() {
 
     let archives = collect_archives(&build_dir);
     let link_names = stage_for_linker(&out_dir, &archives, &target);
-    emit_link_args(&out_dir, &link_names, &target);
+    emit_link_args(&out_dir, &build_dir, &link_names, &target);
 }
 
 /// NDK prebuilt directory tag for the HOST running this build (build
@@ -263,7 +267,7 @@ fn stage_for_linker(out_dir: &Path, archives: &[PathBuf], target: &str) -> Vec<S
         .collect()
 }
 
-fn emit_link_args(out_dir: &Path, archive_names: &[String], target: &str) {
+fn emit_link_args(out_dir: &Path, build_dir: &Path, archive_names: &[String], target: &str) {
     // Only `rustc-link-lib` / `rustc-link-search` propagate from a dependency
     // build script to downstream links (rustc-link-arg does not), so archives
     // are resolved by name in the staged dirs.
@@ -271,16 +275,13 @@ fn emit_link_args(out_dir: &Path, archive_names: &[String], target: &str) {
         let staging = out_dir.join("link");
         println!("cargo:rustc-link-search=native={}", staging.display());
     } else {
-        let wap_build = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-            .join(WAP_SUBDIR)
-            .join("build");
         println!(
             "cargo:rustc-link-search=native={}",
-            wap_build.join("webrtc/modules/audio_processing").display()
+            build_dir.join("webrtc/modules/audio_processing").display()
         );
         println!(
             "cargo:rustc-link-search=native={}",
-            abseil_build_dir(&wap_build).display()
+            abseil_build_dir(build_dir).display()
         );
     }
 
