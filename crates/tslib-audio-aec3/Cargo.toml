@@ -1,0 +1,17 @@
+[package]
+name = "tslib-audio-aec3"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "WebRTC AEC3 echo cancellation engine (vendored freedesktop webrtc-audio-processing 2.1)"
+links = "tslib_audio_aec3"
+
+[lints]
+workspace = true
+
+[dependencies]
+tslib-audio = { path = "../tslib-audio" }
+tracing = { workspace = true }
+
+[build-dependencies]
+cc = "1"

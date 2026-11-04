@@ -104,6 +104,25 @@ const NEAR_CLIP: i16 = 32_700;
 /// brief dropout).
 const BLOWUP_RATIO: usize = 3; // 1/3 of the frame
 
+/// Blow-up guard shared by every [`EchoEngine`] implementation: if the engine
+/// produced a near-clipped frame while the mic was nowhere near clipping, the
+/// adaptation diverged — zero the frame (aligned with the zero-fill contract
+/// of the rest of the audio pipeline) instead of forwarding a digital scream.
+pub fn sanitize_echo_output(out: &mut [i16], mic: &[i16]) {
+    let clipped_out = out.iter().filter(|&&s| s.abs() >= NEAR_CLIP).count();
+    if clipped_out * BLOWUP_RATIO > out.len() {
+        let clipped_mic = mic.iter().filter(|&&s| s.abs() >= NEAR_CLIP).count();
+        if clipped_mic == 0 {
+            tracing::warn!(
+                "echo engine blow-up guard: {}/{} output samples near-clip on a clean mic frame, zeroing frame",
+                clipped_out,
+                out.len()
+            );
+            out.fill(0);
+        }
+    }
+}
+
 impl SpeexEchoEngine {
     /// Create an engine for `sample_rate` Hz, `frame_samples`-sample frames
     /// and a filter tail of `tail_samples` (echo paths slower than that
@@ -160,23 +179,9 @@ impl SpeexEchoEngine {
         self.tail_samples
     }
 
-    /// Blow-up guard: if the engine produced a near-clipped frame while the
-    /// mic was nowhere near clipping, the adaptation diverged — zero the
-    /// frame (aligned with the zero-fill contract of the rest of the audio
-    /// pipeline) instead of forwarding a digital scream.
+    /// Blow-up guard: see [`sanitize_echo_output`].
     fn sanitize(&self, out: &mut [i16], mic: &[i16]) {
-        let clipped_out = out.iter().filter(|&&s| s.abs() >= NEAR_CLIP).count();
-        if clipped_out * BLOWUP_RATIO > out.len() {
-            let clipped_mic = mic.iter().filter(|&&s| s.abs() >= NEAR_CLIP).count();
-            if clipped_mic == 0 {
-                tracing::warn!(
-                    "echo engine blow-up guard: {}/{} output samples near-clip on a clean mic frame, zeroing frame",
-                    clipped_out,
-                    out.len()
-                );
-                out.fill(0);
-            }
-        }
+        sanitize_echo_output(out, mic);
     }
 }
 

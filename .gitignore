@@ -29,3 +29,8 @@ identity.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Vendored AEC3 meson build tree (generated)
+crates/tslib-audio-aec3/c/wap/build/
+crates/tslib-audio-aec3/c/wap/subprojects/abseil-cpp-20240722.0/
+crates/tslib-audio-aec3/c/wap/subprojects/packagecache/*.patch_*

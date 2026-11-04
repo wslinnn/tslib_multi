@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/tslib-core",
     "crates/tslib-audio",
+    "crates/tslib-audio-aec3",
     "crates/tslib-chat",
     "crates/tslib-channel",
     "crates/tslib-ffi",
