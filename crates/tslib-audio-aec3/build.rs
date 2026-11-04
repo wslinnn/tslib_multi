@@ -24,8 +24,11 @@
 //!   each abseil archive is declared twice so a single-pass linker resolves
 //!   the inter-library cycles.
 //! - The Android C++ runtime (`libc++.a`, a thin archive the rlib layer
-//!   cannot ingest) is linked via `-C link-arg=-lc++` in
-//!   `.cargo/config.toml`, effective at the final cdylib link only.
+//!   cannot ingest) is linked via `-C link-arg=-l:libc++.a` in
+//!   `.cargo/config.toml`, effective at the final cdylib link only. The
+//!   exact-name form matters: bare `-lc++` resolves to the shared
+//!   libc++.so, adding a libc++_shared.so runtime dependency the APK does
+//!   not bundle (System.loadLibrary fails at startup).
 
 use std::env;
 use std::path::{Path, PathBuf};

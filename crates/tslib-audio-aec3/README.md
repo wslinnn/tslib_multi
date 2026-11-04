@@ -23,7 +23,9 @@ PulseAudio/PipeWire 维护者打包的上游是 WebRTC（Google）`AudioProcessi
 - 宿主 Linux（CI 测试）：`apt install meson ninja-build`
 - Android（arm64-v8a / x86_64）：`ANDROID_NDK_HOME` 指向 NDK，build.rs 生成
   meson 交叉文件（统一 clang 驱动 + `--target`，API 29 = app minSdk，
-  libc++_static 链接）；CI（ubuntu）负责出双 ABI `.so`
+  libc++ 以静态归档 `-l:libc++.a` 精确名链接——`-lc++` 会选中共享版并引入
+  APK 未打包的 libc++_shared.so 运行时依赖，导致启动 dlopen 失败）；CI（ubuntu）
+  负责出双 ABI `.so`
 
 一个已知的上游兼容点：上游 `meson.build` 声明 `cpp_std=c++17`，但其代码里
 `input_volume_stats_reporter.cc` 使用了指定初始化器，MSVC 严格要求 C++20

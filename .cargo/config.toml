@@ -4,13 +4,16 @@ linker = "aarch64-linux-android29-clang"
 # libc++.a is a thin archive, which rustc's rlib layer cannot ingest
 # (`Unsupported archive identifier`), so it is linked as a plain linker
 # argument instead of `-lstatic`: it only takes effect at the final cdylib
-# link, where lld reads thin archives fine. The NDK clang driver searches
-# the per-API sysroot dir itself, so no -L is needed.
-rustflags = ["-C", "link-arg=-lc++"]
+# link, where lld reads thin archives fine. Resolved by exact file name —
+# a bare `-lc++` would pick the shared libc++.so (preferred over the
+# archive), adding a libc++_shared.so dependency the APK does not bundle,
+# and System.loadLibrary would fail. The NDK clang driver searches the
+# per-API sysroot dir itself, so no -L is needed.
+rustflags = ["-C", "link-arg=-l:libc++.a"]
 
 [target.armv7-linux-androideabi]
 linker = "armv7a-linux-androideabi21-clang"
 
 [target.x86_64-linux-android]
 linker = "x86_64-linux-android29-clang"
-rustflags = ["-C", "link-arg=-lc++"]
+rustflags = ["-C", "link-arg=-l:libc++.a"]
