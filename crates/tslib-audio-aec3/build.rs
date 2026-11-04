@@ -73,6 +73,13 @@ fn main() {
         .include(abseil_source_dir(&wap_dir))
         .std("c++20")
         .warnings(false);
+    if target.contains("android") {
+        // cc crate defaults to emitting `-lc++_shared` for Android C++ —
+        // a runtime dependency the APK does not bundle (loadLibrary would
+        // fail at startup). The static runtime is linked via `-l:libc++.a`
+        // in .cargo/config.toml instead.
+        cc_build.cpp_link_stdlib(None);
+    }
     cc_build.compile("tslib_aec3_wrapper");
 
     let archives = collect_archives(&build_dir);
