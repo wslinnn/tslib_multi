@@ -37,5 +37,21 @@ project 默认值），不改上游任何源文件。
 
 `c/wrapper/aec3_wrapper.cpp` 是几十行的 C ABI shim，直接调
 `webrtc::AudioProcessing`（ProcessReverseStream + ProcessStream，10ms 块）。
-引擎配置只开 AEC3——NS/AGC/HPF 全关：降噪由应用管线（RNNoise）负责，双重
-处理会让两边都变差；采集维持裸 PCM（VOICE_PERFORMANCE），全链路软件处理。
+引擎配置只开 AEC3 + 固定 +6dB 采集后置增益（`capture_level_adjustment`
+的 `post_gain_factor`，APM 在全部采集处理之后缩放输出）——NS/AGC/HPF 全关：
+降噪由应用管线（RNNoise）负责，双重处理会让两边都变差；采集维持裸 PCM
+（VOICE_PERFORMANCE），全链路软件处理。
+
+两个增益相关的选型依据（均有 spike 实测数据，见测试）：
+
+- **后置而非前置**：裸 PCM 普遍偏安静，+6dB 补偿发送响度。增益放 AEC 前
+  会把噪声地板一并抬进 AEC3 抑制器的判定区，实测 static ERLE 19.9→13.0dB；
+  放在链路最末端（`ApplyPostLevelAdjustment`）与消回声零交互，归一化后
+  指标与基线完全一致（19.9/14.7/30.5）。
+- **不用 AGC2**：AGC2 在 AEC 之后运行，RNN VAD 会把"语音形状"的残余回声
+  当成语音放大，远端放音+本端静音时残余回声被抬高约 20dB（实测 static
+  ERLE 19.9→1.1dB）——自回声回归不可接受。
+
+`tslib_aec3_post_gain()` 暴露该常量；防炸看门狗
+（`tslib_audio::echo::sanitize_echo_output`）与 spike 测试均按它归一，
+保证增益不污染抑制能力指标。

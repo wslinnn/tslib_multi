@@ -35,6 +35,7 @@ extern "C" {
         samples: i32,
     ) -> i32;
     fn tslib_aec3_destroy(handle: *mut c_void);
+    fn tslib_aec3_post_gain() -> f32;
 }
 
 /// AEC3-based [`EchoEngine`]. Send but not Sync: all calls must come from
@@ -44,6 +45,7 @@ pub struct Aec3EchoEngine {
     sample_rate: u32,
     frame_samples: usize,
     chunk_samples: usize, // 10 ms — AEC3's native chunk
+    post_gain: f32,       // fixed output gain applied inside the APM after AEC
 }
 
 // Same exclusivity argument as the speex engine: the raw handle is only ever
@@ -77,12 +79,20 @@ impl Aec3EchoEngine {
             sample_rate,
             frame_samples,
             chunk_samples,
+            post_gain: unsafe { tslib_aec3_post_gain() },
         })
     }
 
     /// Sample rate this engine was created for.
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Fixed post-gain the engine applies to the capture output after AEC.
+    /// Test and measurement code normalizes output by it so level metrics
+    /// describe echo suppression, not the level lift itself.
+    pub fn post_gain_factor(&self) -> f32 {
+        self.post_gain
     }
 
     /// Frame size in samples this engine was created for.
@@ -129,7 +139,7 @@ impl EchoEngine for Aec3EchoEngine {
                 )));
             }
         }
-        sanitize_echo_output(out, mic);
+        sanitize_echo_output(out, mic, self.post_gain);
         Ok(out.len())
     }
 
@@ -203,6 +213,39 @@ mod tests {
         assert!(
             peak_out > 0.5 * peak_in,
             "mic was attenuated by the idle engine"
+        );
+    }
+
+    /// The static +6 dB capture post-gain must actually be applied: a quiet
+    /// mic-level input comes out at twice its amplitude (within tolerance for
+    /// the AEC3-forced high-pass). Guards against ApplyConfig silently
+    /// dropping the capture_level_adjustment config (which would leave the
+    /// gain at 1.0 and every device quiet again).
+    #[test]
+    fn post_gain_lifts_quiet_capture() {
+        const N: usize = 960;
+        const FRAMES: usize = 8;
+        let mut engine = Aec3EchoEngine::new(48_000, N, 12_000).unwrap();
+        let gain = engine.post_gain_factor();
+        assert!((gain - 2.0).abs() < 1e-6, "unexpected pre-gain {gain}");
+        let far = vec![0i16; N];
+        let mut out = vec![0i16; N];
+        let mut mic = vec![0i16; N];
+        for f in 0..FRAMES {
+            for (i, m) in mic.iter_mut().enumerate() {
+                let t = f * N + i;
+                *m = (1000.0 * (2.0 * std::f64::consts::PI * 220.0 * t as f64 / 48_000.0).sin())
+                    as i16;
+            }
+            engine.process(&mic, &far, &mut out).unwrap();
+        }
+        let peak_in = mic.iter().map(|s| s.abs()).max().unwrap() as f64;
+        let peak_out = out.iter().map(|s| s.abs()).max().unwrap() as f64;
+        println!("pre-gain: peak in={peak_in} out={peak_out} ratio={:.2}", peak_out / peak_in);
+        assert!(
+            peak_out > 1.6 * peak_in && peak_out < 2.5 * peak_in,
+            "capture output not lifted by the configured pre-gain (ratio={:.2})",
+            peak_out / peak_in
         );
     }
 }

@@ -26,6 +26,11 @@ int32_t tslib_aec3_process_capture(void *handle, const int16_t *mic,
 
 void tslib_aec3_destroy(void *handle);
 
+/* Fixed post-gain the engine applies to the capture output after AEC
+ * (unitless factor, e.g. 2.0 for +6 dB). Callers use it to normalize engine
+ * output when measuring echo suppression. */
+float tslib_aec3_post_gain(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -3,9 +3,19 @@
 // 960-sample (20 ms @ 48 kHz) frame as two process_render/process_capture
 // pairs of sample_rate/100 samples.
 //
-// Engine selection: AEC3 only. The rest of the APM chain (NS, AGC1/2, HPF)
-// stays off — noise suppression is owned by the app pipeline (RNNoise), and
-// double processing degrades both stages.
+// Engine selection: AEC3 plus a static +6 dB post-gain on the capture
+// output. The raw VOICE_PERFORMANCE capture path skips every vendor gain
+// stage and arrives uniformly quiet; the post-gain lifts the transmitted
+// level back into a healthy range. It is applied by the APM after all
+// capture processing (capture_level_adjustment.post_gain_factor), so AEC3
+// keeps operating on native-level input: a pre-gain slot was measured to
+// lift the noise floor into the AEC3 suppressor's comfort zone and cost
+// real suppression. AGC2 was also evaluated for this slot and rejected: it
+// sits after AEC, scores speech-shaped residual echo as speech, and
+// re-amplifies what AEC3 just removed (measured ERLE collapse in echo-only
+// segments). The rest of the APM chain (NS, AGC1/2, HPF) stays off — noise
+// suppression is owned by the app pipeline (RNNoise), and double processing
+// degrades both stages.
 
 #include "aec3_wrapper.h"
 
@@ -17,6 +27,11 @@
 
 namespace {
 
+// Static post-gain on the capture output: +6 dB (x2). Chosen conservatively
+// so loud speech on already-hot devices keeps >20 dB of headroom to full
+// scale; raise only with device measurements in hand.
+constexpr float kTxPostGainFactor = 2.0f;
+
 // 2.x returns a ref-counted AudioProcessing (scoped_refptr); the Engine owns
 // one reference and drops it on delete.
 struct Engine {
@@ -27,6 +42,10 @@ struct Engine {
 };
 
 }  // namespace
+
+extern "C" float tslib_aec3_post_gain(void) {
+    return kTxPostGainFactor;
+}
 
 extern "C" void *tslib_aec3_create(int32_t sample_rate) {
     if (sample_rate != 16000 && sample_rate != 32000 && sample_rate != 48000) {
@@ -40,6 +59,10 @@ extern "C" void *tslib_aec3_create(int32_t sample_rate) {
     config.echo_canceller.mobile_mode = false;
     config.gain_controller1.enabled = false;
     config.gain_controller2.enabled = false;
+    config.capture_level_adjustment.enabled = true;
+    config.capture_level_adjustment.pre_gain_factor = 1.0f;
+    config.capture_level_adjustment.post_gain_factor = kTxPostGainFactor;
+    config.capture_level_adjustment.analog_mic_gain_emulation.enabled = false;
     config.noise_suppression.enabled = false;
     config.high_pass_filter.enabled = false;
     engine->apm->ApplyConfig(config);

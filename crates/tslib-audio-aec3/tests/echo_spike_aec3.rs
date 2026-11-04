@@ -148,7 +148,11 @@ struct ScenarioStats {
     dt_ratio: f64,
 }
 
-fn run_scenario<E: EchoEngine>(name: &str, mut engine: E) -> ScenarioStats {
+fn run_scenario<E: EchoEngine>(name: &str, mut engine: E, gain: f64) -> ScenarioStats {
+    // `gain` is the fixed output gain the engine applies after its processing
+    // (1.0 for speex, 2.0 for the AEC3 engine's post-gain). Output energies
+    // are divided by it before the ERLE/DT math so the numbers describe echo
+    // suppression, not the level lift.
     // Fresh, identically-seeded scenario per engine — apples to apples.
     let mut rng = Lcg(0x5EED_2026_1103);
     let base_delay = 1_900; // ~40 ms: device-measured regime
@@ -217,13 +221,13 @@ fn run_scenario<E: EchoEngine>(name: &str, mut engine: E) -> ScenarioStats {
         }
 
         if (static_start..static_end).contains(&f) {
-            out_static += out.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+            out_static += out.iter().map(|&s| (s as f64 / gain) * (s as f64 / gain)).sum::<f64>();
         } else if (drift_meas_start..drift_meas_end).contains(&f) {
-            out_drift += out.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+            out_drift += out.iter().map(|&s| (s as f64 / gain) * (s as f64 / gain)).sum::<f64>();
         } else if f >= dt_end {
-            out_recovery += out.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+            out_recovery += out.iter().map(|&s| (s as f64 / gain) * (s as f64 / gain)).sum::<f64>();
         } else if (drift_meas_end..dt_end).contains(&f) {
-            dt_out += out.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+            dt_out += out.iter().map(|&s| (s as f64 / gain) * (s as f64 / gain)).sum::<f64>();
         }
     }
 
@@ -262,11 +266,11 @@ fn echo_spike_aec3_vs_speex() {
     let speex = run_scenario(
         "speex MDF",
         SpeexEchoEngine::new(SAMPLE_RATE as u32, FRAME, TAIL).expect("speex engine"),
+        1.0,
     );
-    let aec3 = run_scenario(
-        "AEC3     ",
-        Aec3EchoEngine::new(SAMPLE_RATE as u32, FRAME, TAIL).expect("aec3 engine"),
-    );
+    let aec3_engine = Aec3EchoEngine::new(SAMPLE_RATE as u32, FRAME, TAIL).expect("aec3 engine");
+    let aec3_gain = aec3_engine.post_gain_factor() as f64;
+    let aec3 = run_scenario("AEC3     ", aec3_engine, aec3_gain);
 
     // Common quality floor for both engines, plus an engine-specific drift
     // bar. AEC3 trades the adversarial drift window (1-sample wander every

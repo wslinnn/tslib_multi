@@ -108,10 +108,23 @@ const BLOWUP_RATIO: usize = 3; // 1/3 of the frame
 /// produced a near-clipped frame while the mic was nowhere near clipping, the
 /// adaptation diverged — zero the frame (aligned with the zero-fill contract
 /// of the rest of the audio pipeline) instead of forwarding a digital scream.
-pub fn sanitize_echo_output(out: &mut [i16], mic: &[i16]) {
+/// Blow-up guard for echo engine output: AEC instability shows up as output
+/// slamming the rails on an otherwise clean mic frame, which users hear as
+/// loud crackling; those frames are zeroed instead.
+///
+/// `gain` is the fixed output gain the engine applies after its processing
+/// (e.g. the AEC3 engine's post-gain). The mic-side cleanliness threshold is
+/// scaled by it so that genuine loud speech lifted into the clip region by
+/// the gain is not misclassified as engine blow-up (only frames the mic
+/// itself would drive near-clip at unity gain are spared).
+pub fn sanitize_echo_output(out: &mut [i16], mic: &[i16], gain: f32) {
     let clipped_out = out.iter().filter(|&&s| s.abs() >= NEAR_CLIP).count();
     if clipped_out * BLOWUP_RATIO > out.len() {
-        let clipped_mic = mic.iter().filter(|&&s| s.abs() >= NEAR_CLIP).count();
+        let near_clip = NEAR_CLIP as f32 / gain;
+        let clipped_mic = mic
+            .iter()
+            .filter(|&&s| s.abs() as f32 >= near_clip)
+            .count();
         if clipped_mic == 0 {
             tracing::warn!(
                 "echo engine blow-up guard: {}/{} output samples near-clip on a clean mic frame, zeroing frame",
@@ -181,7 +194,7 @@ impl SpeexEchoEngine {
 
     /// Blow-up guard: see [`sanitize_echo_output`].
     fn sanitize(&self, out: &mut [i16], mic: &[i16]) {
-        sanitize_echo_output(out, mic);
+        sanitize_echo_output(out, mic, 1.0);
     }
 }
 
