@@ -94,6 +94,22 @@ pub extern "system" fn Java_dev_tslib_EchoCanceller_nativeReset(
     }
 }
 
+/// `EchoCanceller.nativeZeroedFrames(ptr)` — cumulative count of frames the
+/// blow-up guard zeroed. A zeroed frame is a 20 ms hole in the transmitted
+/// stream; the app diffs this per diagnostics window to surface any non-zero
+/// rate in its logs.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_EchoCanceller_nativeZeroedFrames(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jlong {
+    match ptr_to_echo(ptr) {
+        Some(handle) => handle.engine.zeroed_frames() as jlong,
+        None => -1,
+    }
+}
+
 /// `EchoCanceller.process(mic, far, out)` — cancel one frame.
 ///
 /// Returns the number of samples written to `out` (the frame size), or a

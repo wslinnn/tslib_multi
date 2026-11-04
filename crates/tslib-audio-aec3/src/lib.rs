@@ -46,6 +46,7 @@ pub struct Aec3EchoEngine {
     frame_samples: usize,
     chunk_samples: usize, // 10 ms — AEC3's native chunk
     post_gain: f32,       // fixed output gain applied inside the APM after AEC
+    zeroed_frames: u64,   // frames the blow-up guard zeroed (diagnostic counter)
 }
 
 // Same exclusivity argument as the speex engine: the raw handle is only ever
@@ -80,6 +81,7 @@ impl Aec3EchoEngine {
             frame_samples,
             chunk_samples,
             post_gain: unsafe { tslib_aec3_post_gain() },
+            zeroed_frames: 0,
         })
     }
 
@@ -93,6 +95,13 @@ impl Aec3EchoEngine {
     /// describe echo suppression, not the level lift itself.
     pub fn post_gain_factor(&self) -> f32 {
         self.post_gain
+    }
+
+    /// Cumulative count of frames the blow-up guard zeroed. A zeroed frame
+    /// is a 20 ms hole in the transmitted stream — any non-zero rate in the
+    /// field is a bug report.
+    pub fn zeroed_frames(&self) -> u64 {
+        self.zeroed_frames
     }
 
     /// Frame size in samples this engine was created for.
@@ -139,7 +148,9 @@ impl EchoEngine for Aec3EchoEngine {
                 )));
             }
         }
-        sanitize_echo_output(out, mic, self.post_gain);
+        if sanitize_echo_output(out, mic, self.post_gain) {
+            self.zeroed_frames += 1;
+        }
         Ok(out.len())
     }
 
