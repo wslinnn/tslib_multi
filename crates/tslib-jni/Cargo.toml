@@ -14,6 +14,7 @@ crate-type = ["cdylib"]
 jni = "0.21"
 tslib-core = { path = "../tslib-core" }
 tslib-audio = { path = "../tslib-audio" }
+tslib-audio-aec3 = { path = "../tslib-audio-aec3" }
 tslib-chat = { path = "../tslib-chat" }
 tslib-channel = { path = "../tslib-channel" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

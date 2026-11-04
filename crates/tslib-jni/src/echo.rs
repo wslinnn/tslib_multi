@@ -1,6 +1,6 @@
 //! `dev.tslib.EchoCanceller` JNI surface — software echo cancellation.
 //!
-//! One handle owns one [`SpeexEchoEngine`]. The engine is stateful and must
+//! One handle owns one [`Aec3EchoEngine`]. The engine is stateful and must
 //! be called from a single thread (the app calls it from the capture loop);
 //! `process` reads `mic`/`far`, writes `out`, and returns the sample count.
 //! Errors throw `TsLibException`; a failed frame must be bypassed by the
@@ -10,12 +10,13 @@ use jni::objects::{JClass, JShortArray};
 use jni::sys::{jint, jlong};
 use jni::JNIEnv;
 
-use tslib_audio::echo::{EchoEngine, SpeexEchoEngine};
+use tslib_audio::echo::EchoEngine;
+use tslib_audio_aec3::Aec3EchoEngine;
 
 use crate::error::{audio_to_jni_result, throw_tslib_exception};
 
 struct EchoHandle {
-    engine: SpeexEchoEngine,
+    engine: Aec3EchoEngine,
     frame_samples: usize,
 }
 
@@ -47,7 +48,7 @@ pub extern "system" fn Java_dev_tslib_EchoCanceller_nativeCreate(
     }
     let engine = match audio_to_jni_result(
         &mut env,
-        SpeexEchoEngine::new(
+        Aec3EchoEngine::new(
             sample_rate as u32,
             frame_samples as usize,
             tail_samples as usize,

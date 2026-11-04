@@ -29,6 +29,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # tslib-audio-aec3 builds the vendored webrtc-audio-processing 2.1 via
+      # meson+ninja; abseil comes from the committed packagecache (offline).
+      - name: Install meson and ninja
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
