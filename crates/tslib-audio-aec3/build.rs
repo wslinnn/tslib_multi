@@ -41,7 +41,10 @@ fn main() {
     let target = env::var("TARGET").expect("TARGET unset");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR unset"));
     let wap_dir = manifest.join(WAP_SUBDIR);
-    let build_dir = wap_dir.join("build");
+    // One meson build tree per target triple: a host-configured tree holds
+    // COFF/ELF objects for the wrong platform, and reconfiguring in place
+    // would thrash between targets.
+    let build_dir = wap_dir.join("build").join(&target);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR unset"));
 
     let meson = require_tool("meson");
@@ -66,8 +69,19 @@ fn main() {
     cc_build.compile("tslib_aec3_wrapper");
 
     let archives = collect_archives(&build_dir);
-    let link_paths = stage_for_linker(&out_dir, &archives, &target);
-    emit_link_args(&link_paths, &target);
+    let link_names = stage_for_linker(&out_dir, &archives, &target);
+    emit_link_args(&out_dir, &link_names, &target);
+}
+
+/// NDK prebuilt directory tag for the HOST running this build (build
+/// scripts execute on the host even when cross-compiling — derive from the
+/// HOST triple, never from TARGET).
+fn ndk_host_tag() -> &'static str {
+    match env::var("HOST").as_deref() {
+        Ok(h) if h.contains("windows") => "windows-x86_64",
+        Ok(h) if h.contains("darwin") || h.contains("macos") => "darwin-x86_64",
+        _ => "linux-x86_64",
+    }
 }
 
 fn require_tool(name: &str) -> String {
@@ -125,11 +139,7 @@ fn write_android_cross_file(out_dir: &Path, target: &str) -> PathBuf {
             .or_else(|_| env::var("ANDROID_NDK_ROOT"))
             .expect("ANDROID_NDK_HOME (or ANDROID_NDK_ROOT) must point at the NDK for Android builds"),
     );
-    let host_tag = match env::var("CARGO_CFG_TARGET_OS").as_deref() {
-        Ok("windows") => "windows-x86_64",
-        Ok("macos") => "darwin-x86_64",
-        _ => "linux-x86_64",
-    };
+    let host_tag = ndk_host_tag();
     let llvm = ndk.join("toolchains/llvm/prebuilt").join(host_tag).join("bin");
 
     let (cpu_family, cpu, triple) = if target.contains("aarch64") {
@@ -151,6 +161,7 @@ fn write_android_cross_file(out_dir: &Path, target: &str) -> PathBuf {
              c = '{c}'\n\
              cpp = '{cpp}'\n\
              ar = '{ar}'\n\
+             strip = '{strip}'\n\
              \n\
              [built-in options]\n\
              c_args = {target_args}\n\
@@ -169,6 +180,7 @@ fn write_android_cross_file(out_dir: &Path, target: &str) -> PathBuf {
             c = quote_meson(&llvm.join("clang")),
             cpp = quote_meson(&llvm.join("clang++")),
             ar = quote_meson(&llvm.join("llvm-ar")),
+            strip = quote_meson(&llvm.join("llvm-strip")),
         ),
     )
     .expect("write meson cross file");
@@ -221,46 +233,77 @@ fn collect_archives(build_dir: &Path) -> Vec<PathBuf> {
     archives
 }
 
-/// MSVC's link.exe resolves archives by `NAME.lib` only, while meson names
-/// MSVC static archives `libNAME.a` — copy them to a staging dir with
-/// conventional names. Other toolchains link the original paths directly.
-fn stage_for_linker(out_dir: &Path, archives: &[PathBuf], target: &str) -> Vec<PathBuf> {
+/// Stage archives with conventional linker names. MSVC's link.exe resolves
+/// `-lstatic=NAME` against `NAME.lib` only, while meson names MSVC static
+/// archives `libNAME.a` — copy them to a staging dir renamed. Other
+/// toolchains keep the meson names and search the original dirs.
+fn stage_for_linker(out_dir: &Path, archives: &[PathBuf], target: &str) -> Vec<String> {
+    let archive_name = |p: &Path| -> String {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .expect("archive file name")
+            .to_string()
+    };
     if !target.contains("msvc") {
-        return archives.to_vec();
+        return archives.iter().map(|p| archive_name(p.as_path())).collect();
     }
     let staging = out_dir.join("link");
     std::fs::create_dir_all(&staging).expect("create link staging dir");
     archives
         .iter()
         .map(|src| {
-            let stem = src
-                .file_name()
-                .and_then(|n| n.to_str())
-                .expect("archive file name")
+            let stem = archive_name(src)
                 .trim_end_matches(".a")
                 .trim_start_matches("lib")
                 .to_string();
             let dst = staging.join(format!("{stem}.lib"));
             std::fs::copy(src, &dst).expect("stage archive for MSVC link");
-            dst
+            stem
         })
         .collect()
 }
 
-fn emit_link_args(link_paths: &[PathBuf], target: &str) {
-    // Wrapper objects (via cc) come first from rustc's own library args; the
-    // archives are appended after them, which is the order static archives
-    // need. ELF linkers resolve archives in one pass, so the abseil set is
-    // wrapped in a group to avoid topological-order failures.
-    let grouped = target.contains("linux") || target.contains("android");
-    if grouped {
-        println!("cargo:rustc-link-arg=-Wl,--start-group");
+fn emit_link_args(out_dir: &Path, archive_names: &[String], target: &str) {
+    // Only `rustc-link-lib` / `rustc-link-search` propagate from a dependency
+    // build script to downstream links (rustc-link-arg does not), so archives
+    // are resolved by name in the staged dirs.
+    if target.contains("msvc") {
+        let staging = out_dir.join("link");
+        println!("cargo:rustc-link-search=native={}", staging.display());
+    } else {
+        let wap_build = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join(WAP_SUBDIR)
+            .join("build");
+        println!(
+            "cargo:rustc-link-search=native={}",
+            wap_build.join("webrtc/modules/audio_processing").display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            abseil_build_dir(&wap_build).display()
+        );
     }
-    for path in link_paths {
-        println!("cargo:rustc-link-arg={}", path.display());
+
+    // Dependency order: wrapper objects (via cc) come first from rustc's own
+    // args, then the APM library, then abseil. ELF linkers resolve archives
+    // in a single left-to-right pass and abseil has inter-library cycles
+    // (e.g. log -> strings), so each abseil archive is declared twice — the
+    // second pass resolves whatever the first pass left open. MSVC resolves
+    // archives in multiple passes and ignores the repetition.
+    for name in archive_names.iter().take(2) {
+        let lib = name.trim_end_matches(".a").trim_start_matches("lib");
+        println!("cargo:rustc-link-lib=static={lib}");
     }
-    if grouped {
-        println!("cargo:rustc-link-arg=-Wl,--end-group");
+    let absl_count = archive_names.len().saturating_sub(2);
+    for i in 0..absl_count {
+        let name = &archive_names[2 + i];
+        let lib = name.trim_end_matches(".a").trim_start_matches("lib");
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
+    for i in 0..absl_count {
+        let name = &archive_names[2 + i];
+        let lib = name.trim_end_matches(".a").trim_start_matches("lib");
+        println!("cargo:rustc-link-lib=static={lib}");
     }
 
     if target.contains("windows") {
@@ -268,31 +311,10 @@ fn emit_link_args(link_paths: &[PathBuf], target: &str) {
         // automatically via the defaultlibs of the import archive.
         println!("cargo:rustc-link-lib=dylib=winmm");
     } else if target.contains("android") {
-        // libc++_static/libc++abi live in the NDK sysroot per-API dir.
-        let ndk = PathBuf::from(
-            env::var("ANDROID_NDK_HOME")
-                .or_else(|_| env::var("ANDROID_NDK_ROOT"))
-                .expect("ANDROID_NDK_HOME unset"),
-        );
-        let host_tag = match env::var("CARGO_CFG_TARGET_OS").as_deref() {
-            Ok("windows") => "windows-x86_64",
-            Ok("macos") => "darwin-x86_64",
-            _ => "linux-x86_64",
-        };
-        let triple = if target.contains("aarch64") {
-            "aarch64-linux-android"
-        } else {
-            "x86_64-linux-android"
-        };
-        let sysroot_lib = ndk
-            .join("toolchains/llvm/prebuilt")
-            .join(host_tag)
-            .join("sysroot/usr/lib")
-            .join(triple)
-            .join(ABI_API_LEVEL.to_string());
-        println!("cargo:rustc-link-search=native={}", sysroot_lib.display());
-        println!("cargo:rustc-link-lib=static=c++_static");
-        println!("cargo:rustc-link-lib=static=c++abi");
+        // The static C++ runtime (libc++.a — a thin archive rustc's rlib
+        // layer cannot ingest) is linked via `-C link-arg=-lc++` in
+        // .cargo/config.toml; the NDK clang driver searches the per-API
+        // sysroot dir itself, so nothing to emit here.
     } else {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
