@@ -41,6 +41,9 @@ pub struct AudioConfig {
     /// Per-user decoder cache limits
     #[serde(default)]
     pub decoder_pool: DecoderPoolConfig,
+    /// Incoming voice jitter buffer
+    #[serde(default)]
+    pub jitter_buffer: JitterBufferConfig,
 }
 
 impl Default for AudioConfig {
@@ -63,6 +66,7 @@ impl Default for AudioConfig {
             output_volume: 1.0,
             playback_buffer_ms: 60,
             decoder_pool: DecoderPoolConfig::default(),
+            jitter_buffer: JitterBufferConfig::default(),
         }
     }
 }
@@ -97,6 +101,46 @@ impl AudioConfig {
     /// Get the playback buffer size in samples
     pub fn playback_buffer_samples(&self) -> usize {
         (self.sample_rate * self.playback_buffer_ms / 1000) as usize
+    }
+}
+
+/// Fixed-delay jitter buffer configuration for incoming voice.
+///
+/// Real-time voice is latency sensitive, so the target delay is fixed: it does
+/// not grow with observed jitter. Packets that arrive after their play time
+/// are dropped instead of delaying the stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JitterBufferConfig {
+    /// Fixed delay between first packet arrival and first playback (ms).
+    pub target_delay_ms: u32,
+    /// Duration of one voice frame (ms), used to schedule consecutive packets.
+    pub frame_duration_ms: u32,
+    /// Maximum consecutive PLC frames before waiting for a real packet.
+    pub max_plc_frames: u32,
+    /// Upper bound on buffered packets per user; excess is dropped oldest.
+    pub max_buffered_frames: usize,
+}
+
+impl Default for JitterBufferConfig {
+    fn default() -> Self {
+        Self {
+            target_delay_ms: 60,
+            frame_duration_ms: 20,
+            max_plc_frames: 3,
+            max_buffered_frames: 8,
+        }
+    }
+}
+
+impl JitterBufferConfig {
+    /// Target delay as a `Duration`.
+    pub fn target_delay(&self) -> Duration {
+        Duration::from_millis(self.target_delay_ms as u64)
+    }
+
+    /// Frame duration as a `Duration`.
+    pub fn frame_duration(&self) -> Duration {
+        Duration::from_millis(self.frame_duration_ms.max(1) as u64)
     }
 }
 

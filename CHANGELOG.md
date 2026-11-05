@@ -34,6 +34,8 @@
 - `AudioStats` / `CaptureStats` / `PlaybackStats` 与 `AudioManager::stats`、`CaptureDevice::stats`、`PlaybackDevice::stats`（采集丢帧、回调争用、播放静音块、解码/PLC 次数、解码器数量）。
 - `Client::users_snapshot` / `channels_snapshot`，事件泵之间重复读取共享同一份 `Arc` 快照；旧 `users()`/`channels()` 保持返回 `Vec`。
 - `Event::AudioReceived` 新增 `seq`，下游可检测丢帧；Java/Python 事件字典同步暴露 `seq`。
+- `JitterBuffer` / `JitterOutput` / `JitterStats` 与 `JitterBufferConfig`（固定 60 ms、20 ms 帧、最多 3 帧 PLC）。
+- `AudioManager::process_incoming_with_seq` 与 `pump_jitter`：按序号缓冲、迟到丢弃、gap 触发 PLC；旧 `process_incoming` 保持直通。
 
 ### Changed
 

@@ -32,6 +32,7 @@ pub mod codec;
 pub mod config;
 pub mod echo;
 pub mod error;
+pub mod jitter;
 pub mod manager;
 pub mod mixer;
 pub mod playback;
@@ -39,8 +40,9 @@ pub mod playback;
 // Re-exports
 pub use capture::{CaptureDevice, CaptureStats, SampleBufferPool};
 pub use codec::{Decoder, Encoder, OpusCodec};
-pub use config::{AudioConfig, DecoderPoolConfig};
+pub use config::{AudioConfig, DecoderPoolConfig, JitterBufferConfig};
 pub use echo::{EchoEngine, SpeexEchoEngine};
 pub use error::{AudioError, Result};
+pub use jitter::{JitterBuffer, JitterOutput, JitterStats};
 pub use manager::{AudioManager, AudioStats};
 pub use playback::{PlaybackDevice, PlaybackStats};

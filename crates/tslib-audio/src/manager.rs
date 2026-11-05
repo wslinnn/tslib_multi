@@ -4,6 +4,7 @@ use crate::capture::{CaptureDevice, CaptureStats, SampleBufferPool, VoiceActivit
 use crate::codec::{Decoder, Encoder, OpusCodec, OpusDecoder, OpusEncoder};
 use crate::config::{AudioConfig, DecoderPoolConfig};
 use crate::error::{AudioError, Result};
+use crate::jitter::{JitterBuffer, JitterOutput};
 use crate::playback::{PlaybackDevice, PlaybackStats};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,12 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 struct DecoderSlot {
     decoder: OpusDecoder,
     last_active: Instant,
+}
+
+/// Per-user fixed-delay jitter buffer and the codec of its stream.
+struct JitterEntry {
+    buffer: JitterBuffer,
+    codec: u8,
 }
 
 /// Idle sweeps run at most this often. Decoders only hold a small Opus state,
@@ -32,6 +39,8 @@ pub struct AudioManager {
     encoder: Arc<Mutex<OpusEncoder>>,
     /// Decoders for incoming audio (per user)
     decoders: Arc<RwLock<HashMap<u16, DecoderSlot>>>,
+    /// Fixed-delay jitter buffers (one per speaking user)
+    jitter: Arc<RwLock<HashMap<u16, JitterEntry>>>,
     /// Last time the decoder cache was swept for idle users
     last_sweep: StdMutex<Instant>,
     /// Successfully decoded incoming packets
@@ -55,6 +64,12 @@ pub struct AudioStats {
     pub decoded_packets: u64,
     /// PLC frames generated after packet loss.
     pub plc_frames: u64,
+    /// Buffered packets across all jitter buffers.
+    pub jitter_buffered: usize,
+    /// Packets dropped as late by jitter buffers.
+    pub jitter_late_dropped: u64,
+    /// PLC frames emitted by jitter buffers for sequence gaps.
+    pub jitter_plc_frames: u64,
     /// Cached per-user decoders.
     pub decoders: usize,
 }
@@ -87,6 +102,7 @@ impl AudioManager {
             playback: Arc::new(Mutex::new(playback)),
             encoder: Arc::new(Mutex::new(encoder)),
             decoders: Arc::new(RwLock::new(HashMap::new())),
+            jitter: Arc::new(RwLock::new(HashMap::new())),
             last_sweep: StdMutex::new(Instant::now()),
             decoded_packets: AtomicU64::new(0),
             plc_frames: AtomicU64::new(0),
@@ -247,6 +263,80 @@ impl AudioManager {
         Ok(())
     }
 
+    /// Process a voice packet through the fixed-delay jitter buffer.
+    ///
+    /// Packets are held until `jitter_buffer.target_delay_ms` has elapsed
+    /// since the first packet of the burst, then played in sequence order.
+    /// Missing sequence numbers trigger up to `max_plc_frames` PLC frames.
+    /// Call [`Self::pump_jitter`] periodically so buffered packets are
+    /// released when no new packets arrive.
+    pub async fn process_incoming_with_seq(
+        &self,
+        user_id: u16,
+        seq: u16,
+        data: &[u8],
+        codec: u8,
+    ) -> Result<()> {
+        ensure_opus_codec(codec)?;
+        let now = Instant::now();
+
+        let outputs = {
+            let mut jitter = self.jitter.write().await;
+            let entry = jitter.entry(user_id).or_insert_with(|| JitterEntry {
+                buffer: JitterBuffer::new(self.config.jitter_buffer.clone()),
+                codec,
+            });
+            entry.codec = codec;
+            entry.buffer.push(seq, data.to_vec(), now);
+            entry.buffer.pump(now)
+        };
+
+        self.play_jitter_outputs(user_id, codec, outputs).await
+    }
+
+    /// Release jitter-buffered packets whose play deadline has passed.
+    ///
+    /// Embeddings with a sequence-aware receive path should call this on a
+    /// short timer (for example every 10–20 ms). Without it, packets buffered
+    /// after the last arrival remain unplayed until the next packet arrives.
+    pub async fn pump_jitter(&self) -> Result<()> {
+        let now = Instant::now();
+        let pending: Vec<(u16, u8, Vec<JitterOutput>)> = {
+            let mut jitter = self.jitter.write().await;
+            jitter
+                .iter_mut()
+                .filter_map(|(&user_id, entry)| {
+                    let outputs = entry.buffer.pump(now);
+                    (!outputs.is_empty()).then_some((user_id, entry.codec, outputs))
+                })
+                .collect()
+        };
+
+        for (user_id, codec, outputs) in pending {
+            self.play_jitter_outputs(user_id, codec, outputs).await?;
+        }
+        Ok(())
+    }
+
+    async fn play_jitter_outputs(
+        &self,
+        user_id: u16,
+        codec: u8,
+        outputs: Vec<JitterOutput>,
+    ) -> Result<()> {
+        for output in outputs {
+            match output {
+                JitterOutput::Packet(data) => {
+                    self.process_incoming(user_id, &data, codec).await?;
+                }
+                JitterOutput::Plc => {
+                    self.handle_packet_loss(user_id).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Set input volume
     pub async fn set_input_volume(&self, volume: f32) -> Result<()> {
         self.capture.lock().await.set_volume(volume)
@@ -272,6 +362,7 @@ impl AudioManager {
     /// Remove a user's audio state
     pub async fn remove_user(&self, user_id: u16) {
         self.decoders.write().await.remove(&user_id);
+        self.jitter.write().await.remove(&user_id);
         let playback = self.playback.lock().await;
         playback.remove_user(user_id);
     }
@@ -304,8 +395,20 @@ impl AudioManager {
     /// decoders removed.
     pub async fn evict_idle_decoders(&self) -> usize {
         let now = Instant::now();
-        let mut decoders = self.decoders.write().await;
-        self.evict_idle_locked(&mut decoders, now)
+        let (removed, remaining) = {
+            let mut decoders = self.decoders.write().await;
+            let removed = self.evict_idle_locked(&mut decoders, now);
+            let remaining: Vec<u16> = decoders.keys().copied().collect();
+            (removed, remaining)
+        };
+
+        if removed > 0 {
+            // Drop jitter buffers whose decoder was evicted; otherwise they
+            // would keep buffered packets for users that are no longer active.
+            let mut jitter = self.jitter.write().await;
+            jitter.retain(|user_id, _| remaining.contains(user_id));
+        }
+        removed
     }
 
     /// Number of cached per-user decoders (diagnostics).
@@ -321,12 +424,28 @@ impl AudioManager {
         let capture = self.capture.lock().await.stats();
         let playback = self.playback.lock().await.stats();
         let decoders = self.decoders.read().await.len();
+        let (jitter_buffered, jitter_late_dropped, jitter_plc_frames) = {
+            let jitter = self.jitter.read().await;
+            let mut buffered = 0usize;
+            let mut late = 0u64;
+            let mut plc = 0u64;
+            for entry in jitter.values() {
+                let stats = entry.buffer.stats();
+                buffered += stats.buffered;
+                late += stats.late_dropped;
+                plc += stats.plc_frames;
+            }
+            (buffered, late, plc)
+        };
 
         AudioStats {
             capture,
             playback,
             decoded_packets: self.decoded_packets.load(Ordering::Relaxed),
             plc_frames: self.plc_frames.load(Ordering::Relaxed),
+            jitter_buffered,
+            jitter_late_dropped,
+            jitter_plc_frames,
             decoders,
         }
     }
@@ -448,6 +567,34 @@ mod tests {
                 Err(AudioError::UnsupportedCodec(value)) if value == codec
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn jitter_delays_then_decodes() {
+        let config = AudioConfig::default();
+        let audio = AudioManager::new(config.clone()).unwrap();
+        let codec = OpusCodec::new(config.clone()).unwrap();
+        let mut encoder = codec.create_encoder().unwrap();
+
+        let pcm: Vec<i16> = (0..config.frame_size_samples() as i16).collect();
+        let mut encoded = vec![0u8; 4000];
+        let len = encoder.encode(&pcm, &mut encoded).unwrap();
+
+        audio
+            .process_incoming_with_seq(7, 1, &encoded[..len], 4)
+            .await
+            .unwrap();
+
+        let stats = audio.stats().await;
+        assert_eq!(stats.jitter_buffered, 1);
+        assert_eq!(stats.decoded_packets, 0);
+
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        audio.pump_jitter().await.unwrap();
+
+        let stats = audio.stats().await;
+        assert_eq!(stats.decoded_packets, 1);
+        assert_eq!(stats.jitter_buffered, 0);
     }
 
     #[tokio::test]
