@@ -483,6 +483,7 @@ impl Client {
     ///
     /// This makes all users visible regardless of which channel they are in.
     pub fn subscribe_all_channels(&mut self) -> Result<()> {
+        self.ensure_connected()?;
         let con = self
             .connection
             .as_mut()
@@ -509,6 +510,7 @@ impl Client {
     /// channels_online, uptime). Without this request those values are
     /// never populated.
     pub fn send_server_variables(&mut self) -> Result<()> {
+        self.ensure_connected()?;
         let con = self
             .connection
             .as_mut()
@@ -1073,6 +1075,16 @@ impl Client {
         self.state.is_connected()
     }
 
+    /// Reject commands unless the client is in an active state. Commands must
+    /// not be sent after `disconnect()` starts or while reconnecting.
+    fn ensure_connected(&self) -> Result<()> {
+        if self.state.is_connected() {
+            Ok(())
+        } else {
+            Err(ConnectionError::NotConnected.into())
+        }
+    }
+
     /// Get our client ID
     pub fn client_id(&self) -> Option<u16> {
         self.client_id
@@ -1218,6 +1230,7 @@ impl Client {
         channel_id: u64,
         password: Option<String>,
     ) -> Result<()> {
+        self.ensure_connected()?;
         let con = self
             .connection
             .as_mut()
@@ -1257,6 +1270,7 @@ impl Client {
 
     /// Send a message to the server
     pub fn send_server_message(&mut self, message: impl Into<String>) -> Result<()> {
+        self.ensure_connected()?;
         let msg = message.into();
         let con = self
             .connection
@@ -1277,6 +1291,7 @@ impl Client {
 
     /// Send a message to the current channel
     pub fn send_channel_message(&mut self, message: impl Into<String>) -> Result<()> {
+        self.ensure_connected()?;
         let msg = message.into();
         let con = self
             .connection
@@ -1297,6 +1312,7 @@ impl Client {
 
     /// Send a private message to a user
     pub fn send_private_message(&mut self, user_id: u16, message: impl Into<String>) -> Result<()> {
+        self.ensure_connected()?;
         let msg = message.into();
         let con = self
             .connection
@@ -1317,6 +1333,7 @@ impl Client {
 
     /// Send a poke to a user
     pub fn send_poke(&mut self, user_id: u16, message: impl Into<String>) -> Result<()> {
+        self.ensure_connected()?;
         let msg = message.into();
         let con = self
             .connection
@@ -1338,6 +1355,7 @@ impl Client {
     pub fn send_audio(&mut self, data: &[u8], codec: AudioCodec) -> Result<()> {
         validate_audio_payload(data.len())?;
         validate_whisper_targets(&self.whisper_clients, &self.whisper_channels)?;
+        self.ensure_connected()?;
 
         let con = self
             .connection
@@ -1395,6 +1413,7 @@ impl Client {
 
     /// Download a file from the server
     pub fn download_file(&mut self, channel_id: u64, path: &str) -> Result<()> {
+        self.ensure_connected()?;
         let con = self
             .connection
             .as_mut()
@@ -1413,6 +1432,7 @@ impl Client {
 
     /// Upload a file to the server
     pub fn upload_file(&mut self, channel_id: u64, path: &str, data: &[u8], overwrite: bool) -> Result<()> {
+        self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let handle = con.upload_file(
             ChannelId(channel_id), path, None, data.len() as u64, overwrite, false,
@@ -1424,6 +1444,7 @@ impl Client {
 
     /// Request the file list for a channel directory
     pub fn list_files(&mut self, channel_id: u64, path: &str) -> Result<()> {
+        self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftgetfilelist");
         cmd.write_arg("cid", &channel_id);
@@ -1439,6 +1460,7 @@ impl Client {
     /// Sends `permoverview cldbid=X cid=Y` and collects responses asynchronously.
     /// Results arrive as ChannelPermissionsUpdated events.
     pub fn query_channel_permissions(&mut self, channel_id: u64) -> Result<()> {
+        self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let state = con.get_state().map_err(|e| Error::Internal(e.to_string()))?;
         let our_client = state.clients.get(&state.own_client)
@@ -1456,6 +1478,7 @@ impl Client {
 
     /// Delete a file on the server
     pub fn delete_file(&mut self, channel_id: u64, name: &str) -> Result<()> {
+        self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftdeletefile");
         cmd.write_arg("cid", &channel_id);
@@ -1467,6 +1490,7 @@ impl Client {
 
     /// Rename a file on the server
     pub fn rename_file(&mut self, channel_id: u64, old_name: &str, new_name: &str) -> Result<()> {
+        self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftrenamefile");
         cmd.write_arg("cid", &channel_id);
@@ -1481,6 +1505,7 @@ impl Client {
 
     /// Create a directory on the server
     pub fn create_directory(&mut self, channel_id: u64, dirname: &str) -> Result<()> {
+        self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftcreatedir");
         cmd.write_arg("cid", &channel_id);
@@ -1538,6 +1563,7 @@ impl Client {
 
     /// Notify the server of our input muted state
     pub fn set_input_muted(&mut self, muted: bool) -> Result<()> {
+        self.ensure_connected()?;
         let con = self
             .connection
             .as_mut()
@@ -1807,5 +1833,56 @@ mod validation_tests {
     #[test]
     fn allows_empty_whisper_targets_to_disable_whisper() {
         assert!(validate_whisper_targets(&[], &[]).is_ok());
+    }
+
+    fn disconnected_client() -> Client {
+        let config = ClientConfig::builder()
+            .address("localhost:9987")
+            .identity(crate::identity::Identity::create().unwrap())
+            .nickname("test")
+            .build()
+            .unwrap();
+        let (event_tx, _) = broadcast::channel(1);
+        Client {
+            connection: None,
+            config,
+            state: ConnectionState::Disconnected,
+            server_state: ServerState::default(),
+            event_tx,
+            handlers: Vec::new(),
+            client_id: None,
+            channel_id: None,
+            audio_sequence: 0,
+            talking_users: HashMap::new(),
+            pending_downloads: HashMap::new(),
+            pending_uploads: HashMap::new(),
+            self_input_muted: None,
+            pending_file_list: None,
+            pending_perm_overview: None,
+            whisper_clients: Vec::new(),
+            whisper_channels: Vec::new(),
+            audio_sink: None,
+        }
+    }
+
+    #[test]
+    fn disconnected_client_rejects_commands() {
+        let mut client = disconnected_client();
+        assert!(matches!(
+            client.send_server_message("x"),
+            Err(Error::Connection(ConnectionError::NotConnected))
+        ));
+        assert!(matches!(
+            client.send_audio(&[0u8; 16], AudioCodec::OpusVoice),
+            Err(Error::Connection(ConnectionError::NotConnected))
+        ));
+        assert!(matches!(
+            client.move_to_channel(1),
+            Err(Error::Connection(ConnectionError::NotConnected))
+        ));
+        assert!(matches!(
+            client.list_files(1, "/"),
+            Err(Error::Connection(ConnectionError::NotConnected))
+        ));
     }
 }
