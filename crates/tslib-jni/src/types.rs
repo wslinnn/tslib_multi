@@ -64,6 +64,20 @@ pub fn create_java_user<'a>(env: &mut JNIEnv<'a>, user: &User) -> JObject<'a> {
         Some(a) => JObject::from(env.new_string(a).unwrap()),
         None => JObject::null(),
     };
+    let created_at = match user.created_at {
+        Some(value) => JObject::from(
+            env.new_object("java/lang/Long", "(J)V", &[JValue::Long(value)])
+                .unwrap(),
+        ),
+        None => JObject::null(),
+    };
+    let last_connected_at = match user.last_connected_at {
+        Some(value) => JObject::from(
+            env.new_object("java/lang/Long", "(J)V", &[JValue::Long(value)])
+                .unwrap(),
+        ),
+        None => JObject::null(),
+    };
 
     // Build server_groups as long[]
     let groups = env
@@ -74,7 +88,7 @@ pub fn create_java_user<'a>(env: &mut JNIEnv<'a>, user: &User) -> JObject<'a> {
 
     env.new_object(
         "dev/tslib/User",
-        "(ILjava/lang/String;JJLjava/lang/String;BZZZZZZZZZZILjava/lang/String;[JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;J)V",
+        "(ILjava/lang/String;JJLjava/lang/String;BZZZZZZZZZZILjava/lang/String;[JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JLjava/lang/Long;Ljava/lang/Long;)V",
         &[
             JValue::Int(user.id as i32),
             JValue::Object(&JObject::from(uid)),
@@ -102,6 +116,8 @@ pub fn create_java_user<'a>(env: &mut JNIEnv<'a>, user: &User) -> JObject<'a> {
             JValue::Object(&description),
             JValue::Object(&avatar_id),
             JValue::Long(user.icon_id),
+            JValue::Object(&created_at),
+            JValue::Object(&last_connected_at),
         ],
     )
     .unwrap_or_else(|_| JObject::null())
@@ -317,7 +333,7 @@ pub fn create_java_event<'a>(
             put_int(env, &map, "user_id", *user_id as i32);
             "talk_status_stop"
         }
-        Event::TextMessage { sender_id, sender_name, message, target } => {
+        Event::TextMessage { sender_id, sender_name, message, target, target_id } => {
             put_int(env, &map, "sender_id", *sender_id as i32);
             put_string(env, &map, "sender_name", sender_name);
             put_string(env, &map, "message", message);
@@ -327,6 +343,9 @@ pub fn create_java_event<'a>(
                 tslib_core::events::MessageTarget::Private => "private",
             };
             put_string(env, &map, "target", target_str);
+            if let Some(id) = target_id {
+                put_long(env, &map, "target_id", *id as i64);
+            }
             "text_message"
         }
         Event::Poked { poker_id, poker_name, message } => {
@@ -395,6 +414,10 @@ pub fn create_java_event<'a>(
             put_int(env, &map, "error_id", *error_id as i32);
             put_string(env, &map, "message", message);
             "command_error"
+        }
+        Event::ConnectionStalled { silent_for_ms } => {
+            put_long(env, &map, "silent_for_ms", *silent_for_ms as i64);
+            "connection_stalled"
         }
         Event::ChannelPermissionsUpdated { channel_id, permission_hints, known } => {
             put_long(env, &map, "channel_id", *channel_id as i64);

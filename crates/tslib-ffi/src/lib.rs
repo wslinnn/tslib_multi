@@ -466,6 +466,7 @@ pub unsafe extern "C" fn tslib_client_pump(
                 sender_name,
                 message,
                 target,
+                ..
             } => {
                 if let Some(callback) = *text_callback {
                     let name = CString::new(sender_name).unwrap_or_default();

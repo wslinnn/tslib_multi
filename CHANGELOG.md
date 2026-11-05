@@ -36,6 +36,11 @@
 - `Event::AudioReceived` 新增 `seq`，下游可检测丢帧；Java/Python 事件字典同步暴露 `seq`。
 - `JitterBuffer` / `JitterOutput` / `JitterStats` 与 `JitterBufferConfig`（固定 60 ms、20 ms 帧、最多 3 帧 PLC）。
 - `AudioManager::process_incoming_with_seq` 与 `pump_jitter`：按序号缓冲、迟到丢弃、gap 触发 PLC；旧 `process_incoming` 保持直通。
+- `ClientConfig.version`（`ClientVersion`）、`initial_input_muted`（默认 `true`）、`reconnect_watchdog`（默认 30 s）。
+- `Event::TextMessage.target_id`：频道消息为频道 id，私聊为目标 client id。
+- `User.created_at` / `last_connected_at`（unix 秒，服务器提供时）。
+- `Event::ConnectionStalled`：临时断线超过 watchdog 时发一次，不改变重连状态。
+- `ChannelManager::joinable_channels` 标记 `#[deprecated]`，推荐按人数过滤的新方法。
 
 ### Changed
 
@@ -67,6 +72,9 @@
 - 采集/播放回调改用 `try_lock`：拿不到锁时丢弃本次采集或输出静音，实时线程不再等待网络/解码线程。
 - `Channel::is_full` 优先使用结构化上限；`max_clients` 保留原有 `-1` 语义。
 - 权限查询失败不再回退 `JOIN` 提示，改为 `known=false`、`bits=0`，调用方可区分“未知”和“拒绝”。
+- `Client::users()` / `channels()` 改为返回 `Arc<[User]>` / `Arc<[Channel]>`，事件泵/状态变更后重建；`users_snapshot` / `channels_snapshot` 作为弃用别名。
+- 初始输入静音改为由 `ClientConfig.initial_input_muted` 控制，默认仍为 `true`。
+- `auto_reconnect` / `reconnect_delay` / `max_reconnect_attempts` 标记 `#[deprecated]`（重连策略由依赖层负责）。
 - `ChannelTree::remove_channel` 删除整棵子树（与服务器行为一致）；新增 `remove_subtree` 返回全部被删频道。
 - `ChannelTree::update_channel` 统一重建结构，拒绝把频道挂到自己的后代下；`path_to`/`print_tree` 遇环终止。
 

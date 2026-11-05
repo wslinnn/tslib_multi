@@ -281,6 +281,10 @@ pub struct User {
     pub idle_time: u64,
     /// Connection time in milliseconds
     pub connected_time: u64,
+    /// Account creation time (unix seconds), when the server provides it
+    pub created_at: Option<i64>,
+    /// Last connection time (unix seconds), when the server provides it
+    pub last_connected_at: Option<i64>,
 }
 
 impl User {

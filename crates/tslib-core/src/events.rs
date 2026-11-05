@@ -87,6 +87,16 @@ pub enum Event {
         sender_name: String,
         message: String,
         target: MessageTarget,
+        /// Channel id for channel messages, client id for private messages,
+        /// `None` for server-wide messages.
+        target_id: Option<u64>,
+    },
+    /// A temporary disconnect has not recovered within the watchdog timeout.
+    ///
+    /// Emitted once per disconnect; the dependency may still reconnect.
+    ConnectionStalled {
+        /// How long the client has been waiting for the reconnect.
+        silent_for_ms: u64,
     },
     /// We were poked by someone
     Poked {
@@ -232,7 +242,7 @@ pub trait EventHandler: Send + Sync {
             Event::Disconnected { reason } => {
                 self.on_disconnected(reason).await;
             }
-            Event::TextMessage { sender_id, sender_name, message, target } => {
+            Event::TextMessage { sender_id, sender_name, message, target, .. } => {
                 self.on_text_message(*sender_id, sender_name, message, *target).await;
             }
             Event::UserJoined { user } => {

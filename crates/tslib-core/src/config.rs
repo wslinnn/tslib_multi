@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::identity::Identity;
 use serde::Serialize;
 use std::time::Duration;
+use tsproto_types::versions::Version as ClientVersion;
 
 /// Client configuration builder
 #[derive(Clone)]
@@ -15,7 +16,10 @@ pub struct ClientConfigBuilder {
     channel: Option<String>,
     channel_password: Option<String>,
     hardware_id: Option<String>,
+    version: Option<ClientVersion>,
+    initial_input_muted: bool,
     connect_timeout: Duration,
+    reconnect_watchdog: Option<Duration>,
     auto_reconnect: bool,
     reconnect_delay: Duration,
     max_reconnect_attempts: u32,
@@ -31,7 +35,10 @@ impl Default for ClientConfigBuilder {
             channel: None,
             channel_password: None,
             hardware_id: None,
+            version: None,
+            initial_input_muted: true,
             connect_timeout: Duration::from_secs(10),
+            reconnect_watchdog: Some(Duration::from_secs(30)),
             auto_reconnect: true,
             reconnect_delay: Duration::from_secs(5),
             max_reconnect_attempts: 5,
@@ -82,31 +89,62 @@ impl ClientConfigBuilder {
         self
     }
 
+    /// Set the client version presented to the server.
+    ///
+    /// `None` (the default) keeps the version chosen by the dependency.
+    pub fn version(mut self, version: ClientVersion) -> Self {
+        self.version = Some(version);
+        self
+    }
+
+    /// Send `client_input_muted=true` after connecting (default `true`).
+    pub fn initial_input_muted(mut self, muted: bool) -> Self {
+        self.initial_input_muted = muted;
+        self
+    }
+
     /// Set the connection timeout
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
         self
     }
 
+    /// Emit `ConnectionStalled` when a temporary disconnect has not completed
+    /// within this timeout. `None` disables the watchdog.
+    pub fn reconnect_watchdog(mut self, timeout: Option<Duration>) -> Self {
+        self.reconnect_watchdog = timeout;
+        self
+    }
+
     /// Enable or disable automatic reconnection
+    #[deprecated(
+        note = "reconnect policy is handled by tsclientlib; kept for source compatibility only"
+    )]
     pub fn auto_reconnect(mut self, enabled: bool) -> Self {
         self.auto_reconnect = enabled;
         self
     }
 
     /// Set the delay between reconnection attempts
+    #[deprecated(
+        note = "reconnect policy is handled by tsclientlib; kept for source compatibility only"
+    )]
     pub fn reconnect_delay(mut self, delay: Duration) -> Self {
         self.reconnect_delay = delay;
         self
     }
 
     /// Set the maximum number of reconnection attempts
+    #[deprecated(
+        note = "reconnect policy is handled by tsclientlib; kept for source compatibility only"
+    )]
     pub fn max_reconnect_attempts(mut self, max: u32) -> Self {
         self.max_reconnect_attempts = max;
         self
     }
 
     /// Build the configuration
+    #[allow(deprecated)]
     pub fn build(self) -> Result<ClientConfig> {
         let address = self
             .address
@@ -131,7 +169,10 @@ impl ClientConfigBuilder {
             channel: self.channel,
             channel_password: self.channel_password,
             hardware_id: self.hardware_id.unwrap_or_else(Self::generate_hardware_id),
+            version: self.version,
+            initial_input_muted: self.initial_input_muted,
             connect_timeout: self.connect_timeout,
+            reconnect_watchdog: self.reconnect_watchdog,
             auto_reconnect: self.auto_reconnect,
             reconnect_delay: self.reconnect_delay,
             max_reconnect_attempts: self.max_reconnect_attempts,
@@ -175,15 +216,32 @@ pub struct ClientConfig {
     pub channel_password: Option<String>,
     /// Hardware ID
     pub hardware_id: String,
+    /// Client version presented to the server (`None` = dependency default)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<ClientVersion>,
+    /// Send `client_input_muted=true` after connecting
+    pub initial_input_muted: bool,
     /// Connection timeout
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
+    /// Emit `ConnectionStalled` if a temporary disconnect does not complete
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconnect_watchdog: Option<Duration>,
     /// Auto-reconnect on disconnect
+    #[deprecated(
+        note = "reconnect policy is handled by tsclientlib; kept for source compatibility only"
+    )]
     pub auto_reconnect: bool,
     /// Delay between reconnect attempts
+    #[deprecated(
+        note = "reconnect policy is handled by tsclientlib; kept for source compatibility only"
+    )]
     #[serde(with = "humantime_serde")]
     pub reconnect_delay: Duration,
     /// Maximum reconnect attempts
+    #[deprecated(
+        note = "reconnect policy is handled by tsclientlib; kept for source compatibility only"
+    )]
     pub max_reconnect_attempts: u32,
 }
 
@@ -279,6 +337,7 @@ mod hex {
     }
 }
 
+#[allow(deprecated)]
 impl std::fmt::Debug for ClientConfigBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientConfigBuilder")
@@ -289,7 +348,10 @@ impl std::fmt::Debug for ClientConfigBuilder {
             .field("channel", &self.channel)
             .field("channel_password", &redacted(&self.channel_password))
             .field("hardware_id", &self.hardware_id)
+            .field("version", &self.version)
+            .field("initial_input_muted", &self.initial_input_muted)
             .field("connect_timeout", &self.connect_timeout)
+            .field("reconnect_watchdog", &self.reconnect_watchdog)
             .field("auto_reconnect", &self.auto_reconnect)
             .field("reconnect_delay", &self.reconnect_delay)
             .field("max_reconnect_attempts", &self.max_reconnect_attempts)
@@ -297,6 +359,7 @@ impl std::fmt::Debug for ClientConfigBuilder {
     }
 }
 
+#[allow(deprecated)]
 impl std::fmt::Debug for ClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientConfig")
@@ -307,7 +370,10 @@ impl std::fmt::Debug for ClientConfig {
             .field("channel", &self.channel)
             .field("channel_password", &redacted(&self.channel_password))
             .field("hardware_id", &self.hardware_id)
+            .field("version", &self.version)
+            .field("initial_input_muted", &self.initial_input_muted)
             .field("connect_timeout", &self.connect_timeout)
+            .field("reconnect_watchdog", &self.reconnect_watchdog)
             .field("auto_reconnect", &self.auto_reconnect)
             .field("reconnect_delay", &self.reconnect_delay)
             .field("max_reconnect_attempts", &self.max_reconnect_attempts)
@@ -404,12 +470,34 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn builder_defaults() {
         let builder = ClientConfigBuilder::default();
         assert_eq!(builder.connect_timeout, Duration::from_secs(10));
         assert!(builder.auto_reconnect);
         assert_eq!(builder.reconnect_delay, Duration::from_secs(5));
         assert_eq!(builder.max_reconnect_attempts, 5);
+    }
+
+    #[test]
+    fn version_and_initial_mute_are_configurable() {
+        let config = ClientConfigBuilder::default()
+            .address("localhost")
+            .identity(Identity::create().unwrap())
+            .version(ClientVersion::Windows_3_0_11__1)
+            .initial_input_muted(false)
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            config.version,
+            Some(ClientVersion::Windows_3_0_11__1)
+        ));
+        assert!(!config.initial_input_muted);
+        assert_eq!(
+            config.reconnect_watchdog,
+            Some(Duration::from_secs(30))
+        );
     }
 
     #[test]

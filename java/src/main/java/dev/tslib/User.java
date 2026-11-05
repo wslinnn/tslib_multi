@@ -30,6 +30,10 @@ public class User {
     public final String description;
     public final String avatarId;
     public final long iconId;
+    /** Account creation time in unix seconds, or null when unavailable. */
+    public final Long createdAt;
+    /** Last connection time in unix seconds, or null when unavailable. */
+    public final Long lastConnectedAt;
 
     public User(int id, String uid, long databaseId, long channelId,
                 String nickname, byte clientType, boolean isTalking,
@@ -41,7 +45,8 @@ public class User {
                 long[] serverGroups, long channelGroup,
                 String platform, String version,
                 String country, String description,
-                String avatarId, long iconId) {
+                String avatarId, long iconId,
+                Long createdAt, Long lastConnectedAt) {
         this.id = id;
         this.uid = uid;
         this.databaseId = databaseId;
@@ -68,6 +73,8 @@ public class User {
         this.description = description;
         this.avatarId = avatarId;
         this.iconId = iconId;
+        this.createdAt = createdAt;
+        this.lastConnectedAt = lastConnectedAt;
     }
 
     /**

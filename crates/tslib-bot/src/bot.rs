@@ -182,6 +182,7 @@ impl Bot {
                         sender_name,
                         message,
                         target,
+                        ..
                     } => {
                         let is_private =
                             matches!(target, tslib_core::events::MessageTarget::Private);

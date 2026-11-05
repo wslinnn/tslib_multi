@@ -20,42 +20,42 @@
 
 ## C1. 正确性收尾（下一批）
 
-- [ ] **C1-1 FR-CN-03 配置剩余项**
+- [x] **C1-1 FR-CN-03 配置剩余项**
   - `ClientConfig.version: Option<String>`（或依赖层 `Version`），接入 `ConnectOptions::version`。
   - `ClientConfig.initial_input_muted: bool`，默认 `true`，替换当前硬编码。
   - `auto_reconnect` / `reconnect_delay` / `max_reconnect_attempts` 加 `#[deprecated]`，文档说明“由依赖层处理，B 不保证”。
   - 同步 Java/Python 配置入口（如已暴露）；写 API 迁移。
   - 验收：可切换客户端版本；初始静音可配置；弃用项有 note。
 
-- [ ] **C1-2 FR-EV-02 文本消息目标 id**
+- [x] **C1-2 FR-EV-02 文本消息目标 id**
   - `Event::TextMessage` 增加 `target_id: Option<u64>`：Server=`None`，Channel=频道 id，Private=目标 client id。
   - 频道消息从 invoker 所在频道或消息目标补全。
   - JNI/Python 事件字典同步；写 API 迁移。
   - 验收：频道消息可拿到频道 id，私聊可拿到目标 id。
 
-- [ ] **C1-3 FR-EV-03 剩余用户字段**
+- [x] **C1-3 FR-EV-03 剩余用户字段**
   - `User` 增加 `created_at` / `last_connected_at`，映射依赖层 `optional_data.created/last_connected`。
   - Java/Python 绑定同步；写 API 迁移。
   - 验收：服务器有值时字段非空。
 
-- [ ] **C1-4 PR-04 破坏性快照**
+- [x] **C1-4 PR-04 破坏性快照**
   - `users()` → `Arc<[User]>`，`channels()` → `Arc<[Channel]>`；缓存失效点保持（事件泵/`sync_state`/`set_input_muted`）。
   - `users_snapshot()` / `channels_snapshot()` 作为过渡别名（可 `#[deprecated]`）。
   - 更新 JNI、Python、FFI、examples、test-suite。
   - 写 `docs/api-changes/v0.2.0.md`：旧/新签名、返回结构、迁移片段、绑定影响。
   - 验收：所有 crate 编译；快照共享测试通过；绑定不再全量克隆。
 
-- [ ] **C1-5 绑定层快照适配**
+- [x] **C1-5 绑定层快照适配**
   - JNI `nativeGetUsers/nativeGetChannels` 使用新返回类型，避免重复 `users()` 调用。
   - Python `Client.users()/channels()` 适配 `&mut self` 与 `Arc`，`ChannelTree.from_channels` 同步。
   - 验收：Android/Java/Python 编译与现有测试通过。
 
-- [ ] **C1-6 FR-ST-05 旧接口收尾**
+- [x] **C1-6 FR-ST-05 旧接口收尾**
   - 决定并实现 `joinable_channels` 的人数语义：改为接收用户列表/占用闭包（破坏）或标 `#[deprecated]` 指向 `joinable_channels_for_users`。
   - 写迁移文档。
   - 验收：满员频道在推荐入口中被排除。
 
-- [ ] **C1-7 L2 接收 watchdog（B 侧缓解）**
+- [x] **C1-7 L2 接收 watchdog（B 侧缓解）**
   - 记录每个说话用户最后音频时间；超过阈值发 `TalkStatusStop`/连接质量事件（不修改 D）。
   - 阈值可配置，默认不误伤正常 20 ms 帧。
   - 验收：模拟长时间无包时状态能恢复；不产生重复事件。

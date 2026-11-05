@@ -93,6 +93,9 @@ impl ChannelManager {
     /// use [`Self::joinable_channels_for_users`] or
     /// [`Self::joinable_channels_with_occupancy`] when member counts are
     /// available.
+    #[deprecated(
+        note = "use joinable_channels_for_users or joinable_channels_with_occupancy"
+    )]
     pub async fn joinable_channels(&self) -> Vec<Channel> {
         self.tree
             .read()
@@ -431,7 +434,7 @@ mod tests {
             has_password: true,
             ..Default::default()
         }).await;
-        let joinable = mgr.joinable_channels().await;
+        let joinable = mgr.joinable_channels_with_occupancy(|_| 0).await;
         assert_eq!(joinable.len(), 1);
         assert_eq!(joinable[0].name, "Normal");
     }

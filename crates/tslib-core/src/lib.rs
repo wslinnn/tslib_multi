@@ -49,3 +49,4 @@ pub use error::{Error, Result};
 pub use events::{AudioCodec, Event, EventHandler};
 pub use identity::Identity;
 pub use state::{Channel, MaxClientsKind, PermissionHints, ServerState, User};
+pub use tsproto_types::versions::Version as ClientVersion;

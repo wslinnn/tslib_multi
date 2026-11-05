@@ -94,7 +94,7 @@ async fn main() {
                         println!("  Connected to server.");
 
                         suite.add_group(online::test_connection(&client));
-                        suite.add_group(online::test_server_state(&client));
+                        suite.add_group(online::test_server_state(&mut client));
                         suite.add_group(online::test_messaging(&mut client).await);
                         suite.add_group(online::test_events(&mut client).await);
                         suite.add_group(online::test_channel_movement(&mut client).await);

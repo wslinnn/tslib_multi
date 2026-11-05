@@ -121,13 +121,23 @@ impl PyClient {
     }
 
     /// Get all channels on the server.
-    fn channels(&self) -> Vec<PyChannel> {
-        self.inner.channels().into_iter().map(PyChannel::from).collect()
+    fn channels(&mut self) -> Vec<PyChannel> {
+        self.inner
+            .channels()
+            .iter()
+            .cloned()
+            .map(PyChannel::from)
+            .collect()
     }
 
     /// Get all connected users.
-    fn users(&self) -> Vec<PyUser> {
-        self.inner.users().into_iter().map(PyUser::from).collect()
+    fn users(&mut self) -> Vec<PyUser> {
+        self.inner
+            .users()
+            .iter()
+            .cloned()
+            .map(PyUser::from)
+            .collect()
     }
 
     /// Get a specific channel by ID.

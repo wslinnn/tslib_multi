@@ -48,7 +48,7 @@ pub fn test_connection(client: &Client) -> TestGroup {
 
 // ── 10. Server State ─────────────────────────────────────────────────
 
-pub fn test_server_state(client: &Client) -> TestGroup {
+pub fn test_server_state(client: &mut Client) -> TestGroup {
     let mut g = TestGroup::new("Server State");
 
     let server_name = client.server_state().server.name.clone();

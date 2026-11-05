@@ -444,7 +444,7 @@ pub extern "system" fn Java_dev_tslib_Client_nativeGetUsers(
     // If still empty, try reading directly from tsclientlib state
     if users.is_empty() {
         log::debug!("nativeGetUsers: still empty after sync, trying direct read");
-        users = handle.client.users_from_connection();
+        users = handle.client.users_from_connection().into();
         log::info!("nativeGetUsers: direct read got {} users", users.len());
     }
 

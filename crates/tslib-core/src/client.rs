@@ -279,6 +279,10 @@ pub struct Client {
     users_snapshot: Option<Arc<[User]>>,
     /// Cached channel snapshot for repeated UI polling
     channels_snapshot: Option<Arc<[Channel]>>,
+    /// When the current temporary disconnect started
+    reconnect_started: Option<Instant>,
+    /// Whether `ConnectionStalled` was already emitted for this disconnect
+    reconnect_stalled_reported: bool,
 }
 
 impl Client {
@@ -314,6 +318,8 @@ impl Client {
             audio_sink: None,
             users_snapshot: None,
             channels_snapshot: None,
+            reconnect_started: None,
+            reconnect_stalled_reported: false,
         };
 
         // Establish connection
@@ -348,6 +354,11 @@ impl Client {
 
         // Send the configured hardware id instead of the dependency default.
         options = options.hardware_id(self.config.hardware_id.clone());
+
+        // Present a specific client version when configured.
+        if let Some(ref version) = self.config.version {
+            options = options.version(version.clone());
+        }
 
         // Connect
         let con = options
@@ -441,6 +452,10 @@ impl Client {
             self.dispatch_event(event.clone()).await;
         }
 
+        if let Some(event) = self.reconnect_watchdog_event() {
+            events.push(event);
+        }
+
         self.invalidate_snapshots();
         Ok(events)
     }
@@ -519,6 +534,10 @@ impl Client {
             self.dispatch_event(event.clone()).await;
         }
 
+        if let Some(event) = self.reconnect_watchdog_event() {
+            events.push(event);
+        }
+
         self.invalidate_snapshots();
         Ok(events)
     }
@@ -576,9 +595,40 @@ impl Client {
         events
     }
 
+    /// Emit a one-shot `ConnectionStalled` when a temporary disconnect has not
+    /// recovered within `reconnect_watchdog`.
+    ///
+    /// This is a B-side mitigation for the dependency's receive-window
+    /// behaviour: it does not change the connection state, so a late recovery
+    /// can still complete normally.
+    fn reconnect_watchdog_event(&mut self) -> Option<Event> {
+        if self.state != ConnectionState::Reconnecting || self.reconnect_stalled_reported {
+            return None;
+        }
+        let timeout = self.config.reconnect_watchdog?;
+        let started = self.reconnect_started?;
+        let elapsed = started.elapsed();
+        if elapsed < timeout {
+            return None;
+        }
+
+        self.reconnect_stalled_reported = true;
+        let event = Event::ConnectionStalled {
+            silent_for_ms: elapsed.as_millis() as u64,
+        };
+        warn!(
+            "Reconnect watchdog: still reconnecting after {} ms",
+            elapsed.as_millis()
+        );
+        let _ = self.event_tx.send(event.clone());
+        Some(event)
+    }
+
     /// Restore session-scoped state after the dependency reconnects.
     fn restore_after_reconnect(&mut self) -> Option<Event> {
         self.state = ConnectionState::Connected;
+        self.reconnect_started = None;
+        self.reconnect_stalled_reported = false;
 
         if let Err(e) = self.subscribe_all_channels() {
             warn!("Reconnect: failed to resubscribe channels: {}", e);
@@ -703,9 +753,12 @@ impl Client {
             self.server_state.channels.len()
         );
 
-        // Default to input muted (PTT mode) so other clients see the mute icon
-        if let Err(e) = self.set_input_muted(true) {
-            warn!("Failed to set initial input muted state: {}", e);
+        // Default to input muted (PTT mode) so other clients see the mute icon.
+        // Users who want an open mic can set `initial_input_muted(false)`.
+        if self.config.initial_input_muted {
+            if let Err(e) = self.set_input_muted(true) {
+                warn!("Failed to set initial input muted state: {}", e);
+            }
         }
 
         Ok(())
@@ -828,6 +881,8 @@ impl Client {
             }
             StreamItem::DisconnectedTemporarily(_reason) => {
                 self.state = ConnectionState::Reconnecting;
+                self.reconnect_started = Some(Instant::now());
+                self.reconnect_stalled_reported = false;
                 let event = Event::ConnectionLost {
                     reason: "Temporary disconnect".to_string(),
                 };
@@ -1002,10 +1057,22 @@ impl Client {
                         Some(event)
                     }
                     _ => {
-                        let msg_target = match target {
-                            TsMessageTarget::Server => crate::events::MessageTarget::Server,
-                            TsMessageTarget::Channel => crate::events::MessageTarget::Channel,
-                            TsMessageTarget::Client(_) => crate::events::MessageTarget::Private,
+                        let (msg_target, target_id) = match target {
+                            TsMessageTarget::Server => {
+                                (crate::events::MessageTarget::Server, None)
+                            }
+                            TsMessageTarget::Channel => (
+                                crate::events::MessageTarget::Channel,
+                                self.server_state
+                                    .users
+                                    .get(&invoker.id.0)
+                                    .map(|user| user.channel_id)
+                                    .or(self.channel_id),
+                            ),
+                            TsMessageTarget::Client(id) => (
+                                crate::events::MessageTarget::Private,
+                                Some(id.0 as u64),
+                            ),
                             TsMessageTarget::Poke(_) => unreachable!(),
                         };
                         let event = Event::TextMessage {
@@ -1013,6 +1080,7 @@ impl Client {
                             sender_name: invoker.name.clone(),
                             message: message.clone(),
                             target: msg_target,
+                            target_id,
                         };
                         debug!(
                             "Text message from {} ({}): {}",
@@ -1689,22 +1757,11 @@ impl Client {
         info
     }
 
-    /// Get all channels from tsclientlib state
-    pub fn channels(&self) -> Vec<Channel> {
-        self.build_channels()
-    }
-
-    fn build_channels(&self) -> Vec<Channel> {
-        self.server_state.channels.values().cloned().collect()
-    }
-
-    /// All channels as a shared, cached snapshot.
+    /// Get all channels from tsclientlib state as a shared snapshot.
     ///
     /// The snapshot is rebuilt after an event pump or a state mutation, so
-    /// repeated UI reads in one frame share a single allocation. The returned
-    /// slice is immutable; use [`Self::channels`] when an owned `Vec` is
-    /// required.
-    pub fn channels_snapshot(&mut self) -> Arc<[Channel]> {
+    /// repeated UI reads in one frame share a single allocation.
+    pub fn channels(&mut self) -> Arc<[Channel]> {
         if let Some(snapshot) = &self.channels_snapshot {
             return Arc::clone(snapshot);
         }
@@ -1713,9 +1770,33 @@ impl Client {
         snapshot
     }
 
-    /// Get all users from tsclientlib state
-    pub fn users(&self) -> Vec<User> {
-        self.build_users()
+    /// Deprecated alias for [`Self::channels`].
+    #[deprecated(note = "use channels() which now returns Arc<[Channel]>")]
+    pub fn channels_snapshot(&mut self) -> Arc<[Channel]> {
+        self.channels()
+    }
+
+    fn build_channels(&self) -> Vec<Channel> {
+        self.server_state.channels.values().cloned().collect()
+    }
+
+    /// Get all users from tsclientlib state as a shared snapshot.
+    ///
+    /// The snapshot is rebuilt after an event pump or a state mutation, so
+    /// repeated UI reads in one frame share a single allocation.
+    pub fn users(&mut self) -> Arc<[User]> {
+        if let Some(snapshot) = &self.users_snapshot {
+            return Arc::clone(snapshot);
+        }
+        let snapshot: Arc<[User]> = self.build_users().into();
+        self.users_snapshot = Some(Arc::clone(&snapshot));
+        snapshot
+    }
+
+    /// Deprecated alias for [`Self::users`].
+    #[deprecated(note = "use users() which now returns Arc<[User]>")]
+    pub fn users_snapshot(&mut self) -> Arc<[User]> {
+        self.users()
     }
 
     fn build_users(&self) -> Vec<User> {
@@ -1732,20 +1813,6 @@ impl Client {
             }
         }
         users
-    }
-
-    /// All users as a shared, cached snapshot.
-    ///
-    /// The snapshot is rebuilt after an event pump or a state mutation, so
-    /// repeated UI reads in one frame share a single allocation. The returned
-    /// slice is immutable; use [`Self::users`] when an owned `Vec` is required.
-    pub fn users_snapshot(&mut self) -> Arc<[User]> {
-        if let Some(snapshot) = &self.users_snapshot {
-            return Arc::clone(snapshot);
-        }
-        let snapshot: Arc<[User]> = self.build_users().into();
-        self.users_snapshot = Some(Arc::clone(&snapshot));
-        snapshot
     }
 
     /// Drop cached snapshots after a state mutation.
@@ -2486,6 +2553,14 @@ fn ts_client_to_user(client: &TsClient) -> User {
             .and_then(|data| data.connected_time)
             .map(|duration| duration.whole_seconds().max(0) as u64)
             .unwrap_or(0),
+        created_at: client
+            .optional_data
+            .as_ref()
+            .map(|data| data.created.unix_timestamp()),
+        last_connected_at: client
+            .optional_data
+            .as_ref()
+            .map(|data| data.last_connected.unix_timestamp()),
     }
 }
 
@@ -2805,6 +2880,21 @@ mod validation_tests {
     }
 
     #[test]
+    fn reconnect_watchdog_fires_once() {
+        let mut client = disconnected_client();
+        client.state = ConnectionState::Reconnecting;
+        client.reconnect_started = Some(Instant::now() - Duration::from_secs(60));
+        client.config.reconnect_watchdog = Some(Duration::from_secs(30));
+
+        let event = client.reconnect_watchdog_event();
+        assert!(matches!(
+            event,
+            Some(Event::ConnectionStalled { .. })
+        ));
+        assert!(client.reconnect_watchdog_event().is_none());
+    }
+
+    #[test]
     fn snapshots_are_shared_until_invalidated() {
         let mut client = disconnected_client();
         client.server_state.users.insert(
@@ -2822,18 +2912,18 @@ mod validation_tests {
             },
         );
 
-        let users_a = client.users_snapshot();
-        let users_b = client.users_snapshot();
+        let users_a = client.users();
+        let users_b = client.users();
         assert!(Arc::ptr_eq(&users_a, &users_b));
         assert_eq!(users_a.len(), 1);
 
-        let channels_a = client.channels_snapshot();
-        let channels_b = client.channels_snapshot();
+        let channels_a = client.channels();
+        let channels_b = client.channels();
         assert!(Arc::ptr_eq(&channels_a, &channels_b));
         assert_eq!(channels_a.len(), 1);
 
         client.invalidate_snapshots();
-        let users_c = client.users_snapshot();
+        let users_c = client.users();
         assert!(!Arc::ptr_eq(&users_a, &users_c));
     }
 
@@ -2922,6 +3012,8 @@ mod validation_tests {
             audio_sink: None,
             users_snapshot: None,
             channels_snapshot: None,
+            reconnect_started: None,
+            reconnect_stalled_reported: false,
         }
     }
 

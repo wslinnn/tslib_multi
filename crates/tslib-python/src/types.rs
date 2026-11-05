@@ -117,6 +117,8 @@ pub struct PyUser {
     pub country: Option<String>,
     pub description: Option<String>,
     pub icon_id: i64,
+    pub created_at: Option<i64>,
+    pub last_connected_at: Option<i64>,
 }
 
 #[pymethods]
@@ -154,6 +156,8 @@ impl From<tslib_core::state::User> for PyUser {
             country: u.country,
             description: u.description,
             icon_id: u.icon_id,
+            created_at: u.created_at,
+            last_connected_at: u.last_connected_at,
         }
     }
 }
@@ -295,7 +299,7 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("type", "talk_status_stop");
             let _ = dict.set_item("user_id", user_id);
         }
-        Event::TextMessage { sender_id, sender_name, message, target } => {
+        Event::TextMessage { sender_id, sender_name, message, target, target_id } => {
             let _ = dict.set_item("type", "text_message");
             let _ = dict.set_item("sender_id", sender_id);
             let _ = dict.set_item("sender_name", sender_name);
@@ -306,6 +310,9 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
                 tslib_core::events::MessageTarget::Private => "private",
             };
             let _ = dict.set_item("target", target_str);
+            if let Some(id) = target_id {
+                let _ = dict.set_item("target_id", id);
+            }
         }
         Event::Poked { poker_id, poker_name, message } => {
             let _ = dict.set_item("type", "poked");
@@ -370,6 +377,10 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
                 let _ = entries.append(entry);
             }
             let _ = dict.set_item("files", entries);
+        }
+        Event::ConnectionStalled { silent_for_ms } => {
+            let _ = dict.set_item("type", "connection_stalled");
+            let _ = dict.set_item("silent_for_ms", silent_for_ms);
         }
         Event::ChannelPermissionsUpdated { channel_id, permission_hints, known } => {
             let _ = dict.set_item("type", "channel_permissions_updated");
