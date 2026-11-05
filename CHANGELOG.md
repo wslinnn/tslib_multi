@@ -12,6 +12,7 @@
 - `Error::InvalidArgument`，用于调用方参数校验失败。
 - `AudioError::UnsupportedCodec`，用于非 Opus 频道。
 - Java `Client.moveToChannel(long, String)` 重载，支持频道密码。
+- `Client` 新增 `download_file_with_password`、`upload_file_with_password`、`list_files_with_password`、`delete_file_with_password`、`rename_file_with_password`、`create_directory_with_password`。
 
 ### Changed
 
