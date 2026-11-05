@@ -345,9 +345,10 @@ pub fn create_java_event<'a>(
             put_long(env, &map, "group_id", *group_id as i64);
             "server_group_removed"
         }
-        Event::AudioReceived { user_id, codec, data, is_whisper } => {
+        Event::AudioReceived { user_id, codec, data, seq, is_whisper } => {
             put_int(env, &map, "user_id", *user_id as i32);
             put_int(env, &map, "codec", codec.id() as i32);
+            put_int(env, &map, "seq", *seq as i32);
             put_boolean(env, &map, "is_whisper", *is_whisper);
             // Put audio data as byte[]
             let byte_array = env.byte_array_from_slice(data).unwrap();

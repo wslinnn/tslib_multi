@@ -109,6 +109,9 @@ pub enum Event {
         /// Opus payload. Shared so broadcast subscribers and the returned
         /// event list reference the same buffer instead of cloning it.
         data: Arc<[u8]>,
+        /// Sender's per-packet voice sequence; receivers use it to detect
+        /// lost frames before decoding.
+        seq: u16,
         /// True when the packet arrived as a whisper (VoiceWhisper) packet
         is_whisper: bool,
     },

@@ -323,10 +323,11 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("user_id", user_id);
             let _ = dict.set_item("group_id", group_id);
         }
-        Event::AudioReceived { user_id, codec, data, is_whisper } => {
+        Event::AudioReceived { user_id, codec, data, seq, is_whisper } => {
             let _ = dict.set_item("type", "audio_received");
             let _ = dict.set_item("user_id", user_id);
             let _ = dict.set_item("codec", codec.id());
+            let _ = dict.set_item("seq", seq);
             let _ = dict.set_item("data_len", data.len());
             let _ = dict.set_item("data", PyBytes::new(py, data));
             let _ = dict.set_item("is_whisper", is_whisper);

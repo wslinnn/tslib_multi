@@ -818,6 +818,7 @@ impl Client {
                         user_id: from_id,
                         codec: codec_type_to_audio_codec(codec),
                         data: Arc::from(*data),
+                        seq,
                         is_whisper,
                     };
                     let _ = self.event_tx.send(event.clone());
