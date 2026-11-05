@@ -793,7 +793,7 @@ impl Client {
                 vec![event]
             }
             StreamItem::MessageEvent(msg) => {
-                log::info!("StreamItem::MessageEvent: cmd={:?}", msg.get_command_name());
+                debug!("StreamItem::MessageEvent: cmd={:?}", msg.get_command_name());
                 self.process_message_event(msg)
             }
             StreamItem::FileDownload(handle, mut result) => {
@@ -1219,11 +1219,11 @@ impl Client {
     /// Note: Text messages and pokes arrive via `BookEvents` as `Event::Message`,
     /// not here. This handles remaining protocol messages like channellistfinished.
     fn process_message_event(&mut self, msg: InMessage) -> Vec<Event> {
-        log::info!("process_message_event: cmd={}", msg.get_command_name());
+        debug!("process_message_event: cmd={}", msg.get_command_name());
         match msg {
             InMessage::FileList(file_list) => {
                 let count = file_list.iter().count();
-                log::info!("Received FileList with {} entries", count);
+                debug!("Received FileList with {} entries", count);
 
                 let key = file_list
                     .return_code
@@ -1246,7 +1246,7 @@ impl Client {
 
                 if let Some(pending) = pending {
                     for part in file_list.iter() {
-                        log::info!(
+                        debug!(
                             "  file entry: name={}, size={}, is_file={}",
                             part.name,
                             part.size,
@@ -1265,7 +1265,7 @@ impl Client {
                 Vec::new()
             }
             InMessage::FileListFinished(finished) => {
-                log::info!("Received FileListFinished");
+                debug!("Received FileListFinished");
                 let mut events = Vec::new();
                 for part in finished.iter() {
                     let channel_id = part.channel_id.0;
@@ -1280,7 +1280,7 @@ impl Client {
 
                     if let Some(key) = key {
                         if let Some(pending) = self.pending_file_lists.remove(&key) {
-                            log::info!(
+                            debug!(
                                 "File list complete: channel={}, path={}, {} files",
                                 pending.channel_id,
                                 pending.path,
@@ -1346,7 +1346,7 @@ impl Client {
                 // Compute hints immediately — tsclientlib consumes the terminating
                 // "error id=0" internally, so CommandError never fires for permoverview.
                 let hints = compute_file_permission_hints(&pending.perms);
-                log::info!(
+                debug!(
                     "Channel {} permission_hints computed: {:#x} ({} perms)",
                     pending.channel_id,
                     hints,
@@ -1364,7 +1364,7 @@ impl Client {
             }
             InMessage::CommandError(ref err) => {
                 for part in err.iter() {
-                    log::info!("CommandError: id={:?}, msg={}", part.id, part.message);
+                    debug!("CommandError: id={:?}, msg={}", part.id, part.message);
                 }
 
                 let mut events = Vec::new();
@@ -1380,7 +1380,7 @@ impl Client {
                     if part.id == TsError::DatabaseEmptyResult {
                         if let Some(key) = return_code {
                             if let Some(pending) = self.pending_file_lists.remove(&key) {
-                                log::info!(
+                                debug!(
                                     "File list empty dir: channel={}, path={}",
                                     pending.channel_id,
                                     pending.path
@@ -1401,7 +1401,7 @@ impl Client {
                     if error_id != 0 {
                         if let Some(key) = return_code {
                             if let Some(pending) = self.pending_perm_overviews.remove(&key) {
-                                log::info!(
+                                debug!(
                                     "permoverview failed for channel {}, keeping join hint only",
                                     pending.channel_id
                                 );
@@ -1922,7 +1922,7 @@ impl Client {
         let our_client = state.clients.get(&state.own_client)
             .ok_or(Error::Internal("Own client not found".to_string()))?;
         let cldbid = our_client.database_id.0;
-        log::info!("query_channel_permissions: cldbid={}, cid={}", cldbid, channel_id);
+        debug!("query_channel_permissions: cldbid={}, cid={}", cldbid, channel_id);
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "permoverview");
         cmd.write_arg("cldbid", &cldbid);
         cmd.write_arg("cid", &channel_id);
@@ -2248,7 +2248,7 @@ fn ts_channel_to_channel(channel: &TsChannel) -> Channel {
         permission_hints: {
             let hints = channel.permission_hints.map(|h| h.bits() as u64).unwrap_or(0);
             if hints != 0 {
-                log::info!("Channel {} ({}) permission_hints = {:#x}", channel.name, channel.id.0, hints);
+                debug!("Channel {} ({}) permission_hints = {:#x}", channel.name, channel.id.0, hints);
             }
             hints
         },
@@ -2325,7 +2325,11 @@ fn compute_file_permission_hints(perms: &HashMap<u32, i32>) -> u64 {
         hints |= HINT_FILE_DIRECTORY_CREATE;
     }
 
-    log::info!("compute_file_permission_hints: perms={:?} -> hints={:#x}", perms, hints);
+    debug!(
+        "compute_file_permission_hints: {} perms -> hints={:#x}",
+        perms.len(),
+        hints
+    );
     hints
 }
 
