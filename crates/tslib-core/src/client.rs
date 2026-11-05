@@ -108,6 +108,13 @@ fn validate_whisper_targets(clients: &[u16], channels: &[u64]) -> Result<()> {
     Ok(())
 }
 
+/// Encode a channel password for file commands. Empty when absent.
+fn encode_channel_password(password: Option<&str>) -> String {
+    password
+        .map(|password| tsproto_types::crypto::encode_password(password.as_bytes()))
+        .unwrap_or_default()
+}
+
 /// Read exactly `size` bytes, resetting the idle timer after every chunk.
 async fn read_exact_with_idle_timeout<R: AsyncRead + Unpin>(
     reader: &mut R,
@@ -1535,6 +1542,16 @@ impl Client {
 
     /// Download a file from the server
     pub fn download_file(&mut self, channel_id: u64, path: &str) -> Result<()> {
+        self.download_file_with_password(channel_id, path, None)
+    }
+
+    /// Download a file from a channel, optionally protected by a password.
+    pub fn download_file_with_password(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        password: Option<&str>,
+    ) -> Result<()> {
         self.ensure_connected()?;
         let con = self
             .connection
@@ -1542,7 +1559,7 @@ impl Client {
             .ok_or(ConnectionError::NotConnected)?;
 
         let handle = con
-            .download_file(ChannelId(channel_id), path, None, None)
+            .download_file(ChannelId(channel_id), path, password, None)
             .map_err(|e| Error::Internal(e.to_string()))?;
 
         self.pending_downloads
@@ -1554,10 +1571,22 @@ impl Client {
 
     /// Upload a file to the server
     pub fn upload_file(&mut self, channel_id: u64, path: &str, data: &[u8], overwrite: bool) -> Result<()> {
+        self.upload_file_with_password(channel_id, path, data, overwrite, None)
+    }
+
+    /// Upload a file to a channel, optionally protected by a password.
+    pub fn upload_file_with_password(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        data: &[u8],
+        overwrite: bool,
+        password: Option<&str>,
+    ) -> Result<()> {
         self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let handle = con.upload_file(
-            ChannelId(channel_id), path, None, data.len() as u64, overwrite, false,
+            ChannelId(channel_id), path, password, data.len() as u64, overwrite, false,
         ).map_err(|e| Error::Internal(e.to_string()))?;
         self.pending_uploads.insert(handle.0, (channel_id, path.to_string(), data.to_vec()));
         debug!("Started upload: channel={}, path={}, size={}", channel_id, path, data.len());
@@ -1566,11 +1595,21 @@ impl Client {
 
     /// Request the file list for a channel directory
     pub fn list_files(&mut self, channel_id: u64, path: &str) -> Result<()> {
+        self.list_files_with_password(channel_id, path, None)
+    }
+
+    /// Request the file list for a password-protected channel directory.
+    pub fn list_files_with_password(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        password: Option<&str>,
+    ) -> Result<()> {
         self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftgetfilelist");
         cmd.write_arg("cid", &channel_id);
-        cmd.write_arg("cpw", &"");
+        cmd.write_arg("cpw", &encode_channel_password(password));
         cmd.write_arg("path", &path);
         cmd.send(con).map_err(|e| Error::Internal(e.to_string()))?;
         self.pending_file_list = Some((channel_id, path.to_string(), Vec::new()));
@@ -1600,11 +1639,21 @@ impl Client {
 
     /// Delete a file on the server
     pub fn delete_file(&mut self, channel_id: u64, name: &str) -> Result<()> {
+        self.delete_file_with_password(channel_id, name, None)
+    }
+
+    /// Delete a file in a password-protected channel.
+    pub fn delete_file_with_password(
+        &mut self,
+        channel_id: u64,
+        name: &str,
+        password: Option<&str>,
+    ) -> Result<()> {
         self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftdeletefile");
         cmd.write_arg("cid", &channel_id);
-        cmd.write_arg("cpw", &"");
+        cmd.write_arg("cpw", &encode_channel_password(password));
         cmd.write_arg("name", &name);
         cmd.send(con).map_err(|e| Error::Internal(e.to_string()))?;
         Ok(())
@@ -1612,13 +1661,25 @@ impl Client {
 
     /// Rename a file on the server
     pub fn rename_file(&mut self, channel_id: u64, old_name: &str, new_name: &str) -> Result<()> {
+        self.rename_file_with_password(channel_id, old_name, new_name, None)
+    }
+
+    /// Rename a file in a password-protected channel.
+    pub fn rename_file_with_password(
+        &mut self,
+        channel_id: u64,
+        old_name: &str,
+        new_name: &str,
+        password: Option<&str>,
+    ) -> Result<()> {
         self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
+        let encoded = encode_channel_password(password);
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftrenamefile");
         cmd.write_arg("cid", &channel_id);
-        cmd.write_arg("cpw", &"");
+        cmd.write_arg("cpw", &encoded);
         cmd.write_arg("tcid", &channel_id);
-        cmd.write_arg("tcpw", &"");
+        cmd.write_arg("tcpw", &encoded);
         cmd.write_arg("oldname", &old_name);
         cmd.write_arg("newname", &new_name);
         cmd.send(con).map_err(|e| Error::Internal(e.to_string()))?;
@@ -1627,11 +1688,21 @@ impl Client {
 
     /// Create a directory on the server
     pub fn create_directory(&mut self, channel_id: u64, dirname: &str) -> Result<()> {
+        self.create_directory_with_password(channel_id, dirname, None)
+    }
+
+    /// Create a directory in a password-protected channel.
+    pub fn create_directory_with_password(
+        &mut self,
+        channel_id: u64,
+        dirname: &str,
+        password: Option<&str>,
+    ) -> Result<()> {
         self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftcreatedir");
         cmd.write_arg("cid", &channel_id);
-        cmd.write_arg("cpw", &"");
+        cmd.write_arg("cpw", &encode_channel_password(password));
         cmd.write_arg("dirname", &dirname);
         cmd.send(con).map_err(|e| Error::Internal(e.to_string()))?;
         Ok(())
@@ -1955,6 +2026,14 @@ mod validation_tests {
     #[test]
     fn allows_empty_whisper_targets_to_disable_whisper() {
         assert!(validate_whisper_targets(&[], &[]).is_ok());
+    }
+
+    #[test]
+    fn channel_password_is_encoded() {
+        assert_eq!(encode_channel_password(None), "");
+        let expected = tsproto_types::crypto::encode_password(b"secret");
+        assert_eq!(encode_channel_password(Some("secret")), expected);
+        assert_ne!(encode_channel_password(Some("secret")), "secret");
     }
 
     fn disconnected_client() -> Client {
