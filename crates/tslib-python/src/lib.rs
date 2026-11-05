@@ -22,6 +22,14 @@ use pyo3::prelude::*;
 ///     client.wait_connected()
 ///     client.send_server_message("Hello from Python!")
 ///     client.disconnect()
+///
+/// Threading::
+///
+///     The client is unsendable and ``wait_connected()`` / ``process_events()``
+///     block the calling thread while holding the GIL. Run the event loop on a
+///     dedicated Python thread (or thread the client through a queue) if other
+///     threads must stay responsive. A future release will move the connection
+///     to a background thread with non-blocking results.
 #[pymodule]
 fn tslib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Identity

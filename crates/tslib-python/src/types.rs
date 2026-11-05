@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 /// Connection state constants.
 #[pyclass(name = "ConnectionState")]
@@ -324,6 +324,7 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("user_id", user_id);
             let _ = dict.set_item("codec", codec.id());
             let _ = dict.set_item("data_len", data.len());
+            let _ = dict.set_item("data", PyBytes::new(py, data));
             let _ = dict.set_item("is_whisper", is_whisper);
         }
         Event::FileDownloaded { channel_id, path, data } => {
@@ -331,6 +332,7 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("channel_id", channel_id);
             let _ = dict.set_item("path", path.as_str());
             let _ = dict.set_item("data_len", data.len());
+            let _ = dict.set_item("data", PyBytes::new(py, data));
         }
         Event::FileTransferFailed { path, error } => {
             let _ = dict.set_item("type", "file_transfer_failed");
@@ -352,6 +354,17 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("channel_id", channel_id);
             let _ = dict.set_item("path", path.as_str());
             let _ = dict.set_item("file_count", files.len());
+
+            let entries = PyList::empty(py);
+            for file in files {
+                let entry = PyDict::new(py);
+                let _ = entry.set_item("name", &file.name);
+                let _ = entry.set_item("size", file.size);
+                let _ = entry.set_item("datetime", file.datetime);
+                let _ = entry.set_item("is_file", file.is_file);
+                let _ = entries.append(entry);
+            }
+            let _ = dict.set_item("files", entries);
         }
         Event::ChannelPermissionsUpdated { channel_id, permission_hints } => {
             let _ = dict.set_item("type", "channel_permissions_updated");

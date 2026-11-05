@@ -68,6 +68,7 @@ impl PyClient {
     /// Wait for the connection to be fully established.
     ///
     /// This blocks until the initial state synchronization is complete.
+    /// It holds the GIL while blocking; see the module docstring.
     fn wait_connected(&mut self) -> PyResult<()> {
         self.runtime
             .block_on(self.inner.wait_connected())
@@ -77,6 +78,8 @@ impl PyClient {
     /// Process pending events from the server.
     ///
     /// Returns a list of event dicts. Call this regularly to stay in sync.
+    /// This blocks the calling thread and holds the GIL while it waits for
+    /// the connection stream.
     fn process_events<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let events = self
             .runtime
@@ -137,9 +140,12 @@ impl PyClient {
         self.inner.user(id).map(PyUser::from)
     }
 
-    /// Get server information.
+    /// Get live server information.
+    ///
+    /// Reads the current bookkeeping state (online clients/channels, uptime)
+    /// instead of returning a cached snapshot from the last sync.
     fn server_info(&self) -> PyServerInfo {
-        PyServerInfo::from(self.inner.server_state().server.clone())
+        PyServerInfo::from(self.inner.server_info())
     }
 
     /// Send a message to the entire server.

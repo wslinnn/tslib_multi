@@ -23,6 +23,9 @@
 - `AudioManager::handle_event` / `handle_events`，把 `UserLeft` 映射为解码器与混音缓冲清理。
 - `AudioManager::evict_idle_decoders`、`AudioManager::decoder_count`，用于主动回收与诊断。
 - `SampleBufferPool` 与 `CaptureDevice::start_with_pool`，在采集回调与编码任务之间复用 PCM 帧缓冲。
+- `ChatHistory::add_server_message` / `add_channel_message` / `add_private_message`（Rust 与 Python 同步）。
+- Python 事件字典补齐 `audio_received.data`、`file_downloaded.data`、`file_list_received.files`。
+- Python `Client.server_info()` 改为读取实时状态，不再返回上次同步的缓存。
 
 ### Changed
 

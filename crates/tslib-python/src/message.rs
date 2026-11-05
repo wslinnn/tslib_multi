@@ -128,6 +128,36 @@ impl PyChatHistory {
         self.inner.server_messages().map(PyChatMessage::from).collect()
     }
 
+    /// Add a server-wide message to history.
+    fn add_server_message(&mut self, sender_id: u16, sender_name: String, content: String) {
+        self.inner
+            .add_server_message(sender_id, sender_name, content);
+    }
+
+    /// Add a channel message to history.
+    fn add_channel_message(
+        &mut self,
+        channel_id: u64,
+        sender_id: u16,
+        sender_name: String,
+        content: String,
+    ) {
+        self.inner
+            .add_channel_message(channel_id, sender_id, sender_name, content);
+    }
+
+    /// Add a private message with ``user_id`` to history.
+    fn add_private_message(
+        &mut self,
+        user_id: u16,
+        sender_id: u16,
+        sender_name: String,
+        content: String,
+    ) {
+        self.inner
+            .add_private_message(user_id, sender_id, sender_name, content);
+    }
+
     /// Get channel messages by channel ID.
     fn channel_messages(&self, channel_id: u64) -> Vec<PyChatMessage> {
         self.inner

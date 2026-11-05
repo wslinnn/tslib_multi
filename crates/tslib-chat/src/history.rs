@@ -46,6 +46,53 @@ impl ChatHistory {
         queue.push_back(message);
     }
 
+    /// Add a server-wide message.
+    pub fn add_server_message(
+        &mut self,
+        sender_id: u16,
+        sender_name: impl Into<String>,
+        content: impl Into<String>,
+    ) {
+        self.add(ChatMessage::new(
+            sender_id,
+            sender_name,
+            MessageTarget::Server,
+            content,
+        ));
+    }
+
+    /// Add a message to a channel conversation.
+    pub fn add_channel_message(
+        &mut self,
+        channel_id: u64,
+        sender_id: u16,
+        sender_name: impl Into<String>,
+        content: impl Into<String>,
+    ) {
+        self.add(ChatMessage::new(
+            sender_id,
+            sender_name,
+            MessageTarget::Channel(channel_id),
+            content,
+        ));
+    }
+
+    /// Add a private message with `user_id` (the other participant).
+    pub fn add_private_message(
+        &mut self,
+        user_id: u16,
+        sender_id: u16,
+        sender_name: impl Into<String>,
+        content: impl Into<String>,
+    ) {
+        self.add(ChatMessage::new(
+            sender_id,
+            sender_name,
+            MessageTarget::Private(user_id),
+            content,
+        ));
+    }
+
     /// Get server messages
     pub fn server_messages(&self) -> impl Iterator<Item = &ChatMessage> {
         self.server_messages.iter()
@@ -183,6 +230,19 @@ mod tests {
         h.add(channel_msg(1, "c"));
         h.add(private_msg(2, 1, "p"));
         assert_eq!(h.all_messages().count(), 3);
+    }
+
+    #[test]
+    fn convenience_add_methods() {
+        let mut h = ChatHistory::new(100);
+        h.add_server_message(1, "Alice", "s");
+        h.add_channel_message(10, 2, "Bob", "c");
+        h.add_private_message(5, 2, "Bob", "p");
+
+        assert_eq!(h.server_messages().count(), 1);
+        assert_eq!(h.channel_messages(10).count(), 1);
+        assert_eq!(h.private_messages(5).count(), 1);
+        assert_eq!(h.total_count(), 3);
     }
 
     #[test]
