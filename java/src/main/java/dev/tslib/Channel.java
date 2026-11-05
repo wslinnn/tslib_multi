@@ -9,7 +9,7 @@ public class Channel {
     public final String name;
     public final String topic;
     public final String description;
-    public final int order;
+    public final long order;
     public final boolean isPermanent;
     public final boolean isSemiPermanent;
     public final boolean isDefault;
@@ -31,7 +31,7 @@ public class Channel {
     public static final long PERM_FILE_DIRECTORY_CREATE = 2048;
 
     public Channel(long id, long parentId, String name, String topic,
-                   String description, int order, boolean isPermanent,
+                   String description, long order, boolean isPermanent,
                    boolean isSemiPermanent, boolean isDefault,
                    boolean hasPassword, byte codec, byte codecQuality,
                    int maxClients, int maxFamilyClients,

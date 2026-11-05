@@ -17,14 +17,14 @@ pub fn create_java_channel<'a>(env: &mut JNIEnv<'a>, ch: &Channel) -> JObject<'a
 
     env.new_object(
         "dev/tslib/Channel",
-        "(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;IZZZZBBIIIJJ)V",
+        "(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;JZZZZBBIIIJJ)V",
         &[
             JValue::Long(ch.id as i64),
             JValue::Long(ch.parent_id as i64),
             JValue::Object(&JObject::from(name)),
             JValue::Object(&topic),
             JValue::Object(&description),
-            JValue::Int(ch.order),
+            JValue::Long(ch.order as i64),
             JValue::Bool(ch.is_permanent as u8),
             JValue::Bool(ch.is_semi_permanent as u8),
             JValue::Bool(ch.is_default as u8),

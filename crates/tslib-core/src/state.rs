@@ -108,8 +108,8 @@ pub struct Channel {
     pub topic: Option<String>,
     /// Channel description
     pub description: Option<String>,
-    /// Channel order
-    pub order: i32,
+    /// Channel order: the preceding channel id, not a sort weight.
+    pub order: u64,
     /// Is permanent channel
     pub is_permanent: bool,
     /// Is semi-permanent channel

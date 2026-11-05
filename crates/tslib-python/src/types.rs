@@ -39,7 +39,7 @@ pub struct PyChannel {
     pub name: String,
     pub topic: Option<String>,
     pub description: Option<String>,
-    pub order: i32,
+    pub order: u64,
     pub is_permanent: bool,
     pub is_semi_permanent: bool,
     pub is_default: bool,

@@ -17,7 +17,7 @@ use tslib_bot::BotConfig;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn make_channel(id: u64, parent_id: u64, name: &str, order: i32) -> Channel {
+fn make_channel(id: u64, parent_id: u64, name: &str, order: u64) -> Channel {
     Channel {
         id,
         parent_id,

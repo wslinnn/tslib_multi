@@ -1,7 +1,56 @@
 //! Channel tree structure
 
 use tslib_core::state::Channel;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// Order siblings by the TS3 `channel_order` predecessor chain.
+///
+/// `order` is the id of the preceding sibling, not a numeric sort weight.
+/// `0` (or a predecessor outside this sibling set) marks a chain head. Any
+/// channels left over (cycles, duplicate predecessors) are appended by id so
+/// the result is deterministic and never loops.
+fn order_siblings(channels: &HashMap<u64, Channel>, siblings: &mut Vec<u64>) {
+    if siblings.len() < 2 {
+        return;
+    }
+
+    let ids: HashSet<u64> = siblings.iter().copied().collect();
+    let mut next: HashMap<u64, u64> = HashMap::new();
+    let mut heads = Vec::new();
+
+    for &id in siblings.iter() {
+        let previous = channels.get(&id).map(|channel| channel.order).unwrap_or(0);
+        if previous == 0 || !ids.contains(&previous) {
+            heads.push(id);
+        } else {
+            next.entry(previous).or_insert(id);
+        }
+    }
+
+    heads.sort_unstable();
+    let mut ordered = Vec::with_capacity(siblings.len());
+    let mut used = HashSet::new();
+
+    for head in heads {
+        let mut current = head;
+        while used.insert(current) {
+            ordered.push(current);
+            match next.get(&current) {
+                Some(&next_id) if !used.contains(&next_id) => current = next_id,
+                _ => break,
+            }
+        }
+    }
+
+    let mut leftover: Vec<u64> = siblings
+        .iter()
+        .copied()
+        .filter(|id| !used.contains(id))
+        .collect();
+    leftover.sort_unstable();
+    ordered.extend(leftover);
+    *siblings = ordered;
+}
 
 /// Channel tree representation
 #[derive(Debug, Clone)]
@@ -36,22 +85,8 @@ impl ChannelTree {
 
     /// Add a channel to the tree
     pub fn add_channel(&mut self, channel: Channel) {
-        let id = channel.id;
-        let parent_id = channel.parent_id;
-
-        self.channels.insert(id, channel);
-
-        // Update structure
-        if parent_id == 0 {
-            if !self.roots.contains(&id) {
-                self.roots.push(id);
-            }
-        } else {
-            self.children
-                .entry(parent_id)
-                .or_default()
-                .push(id);
-        }
+        self.channels.insert(channel.id, channel);
+        self.rebuild_structure();
     }
 
     /// Remove a channel from the tree
@@ -192,16 +227,12 @@ impl ChannelTree {
             }
         }
 
-        // Sort roots by order
-        self.roots.sort_by_key(|id| {
-            self.channels.get(id).map(|c| c.order).unwrap_or(0)
-        });
+        // Sort roots by the predecessor chain
+        order_siblings(&self.channels, &mut self.roots);
 
-        // Sort children by order
+        // Sort children by the predecessor chain
         for children in self.children.values_mut() {
-            children.sort_by_key(|id| {
-                self.channels.get(id).map(|c| c.order).unwrap_or(0)
-            });
+            order_siblings(&self.channels, children);
         }
     }
 
@@ -238,7 +269,7 @@ impl Default for ChannelTree {
 mod tests {
     use super::*;
 
-    fn ch(id: u64, parent_id: u64, name: &str, order: i32) -> Channel {
+    fn ch(id: u64, parent_id: u64, name: &str, order: u64) -> Channel {
         Channel {
             id,
             parent_id,
@@ -408,5 +439,47 @@ mod tests {
         let roots = tree.roots();
         assert_eq!(roots[0].name, "A");
         assert_eq!(roots[1].name, "B");
+    }
+
+    #[test]
+    fn roots_follow_predecessor_chain() {
+        let mut tree = ChannelTree::new();
+        // Insert out of order; chain is 1 -> 2 -> 3.
+        tree.add_channel(ch(3, 0, "C", 2));
+        tree.add_channel(ch(1, 0, "A", 0));
+        tree.add_channel(ch(2, 0, "B", 1));
+
+        let names: Vec<_> = tree.roots().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn children_follow_predecessor_chain() {
+        let mut tree = ChannelTree::new();
+        tree.add_channel(ch(10, 0, "Root", 0));
+        tree.add_channel(ch(13, 10, "C", 12));
+        tree.add_channel(ch(11, 10, "A", 0));
+        tree.add_channel(ch(12, 10, "B", 11));
+
+        let names: Vec<_> = tree.children(10).iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn order_cycle_does_not_loop() {
+        let tree = ChannelTree::from_channels(vec![
+            ch(1, 0, "A", 2),
+            ch(2, 0, "B", 1),
+        ]);
+
+        let names: Vec<_> = tree.roots().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["A", "B"]);
+    }
+
+    #[test]
+    fn missing_predecessor_is_a_head() {
+        let tree = ChannelTree::from_channels(vec![ch(1, 0, "A", 99)]);
+        assert_eq!(tree.roots().len(), 1);
+        assert_eq!(tree.roots()[0].name, "A");
     }
 }

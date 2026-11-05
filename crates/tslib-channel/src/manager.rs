@@ -123,7 +123,7 @@ pub struct ChannelBuilder {
     max_clients: i32,
     is_permanent: bool,
     is_semi_permanent: bool,
-    order: i32,
+    order: u64,
 }
 
 impl ChannelBuilder {
@@ -202,7 +202,7 @@ impl ChannelBuilder {
     }
 
     /// Set channel order
-    pub fn order(mut self, order: i32) -> Self {
+    pub fn order(mut self, order: u64) -> Self {
         self.order = order;
         self
     }

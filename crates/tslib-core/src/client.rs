@@ -1813,7 +1813,7 @@ fn ts_channel_to_channel(channel: &TsChannel) -> Channel {
         name: channel.name.clone(),
         topic: channel.topic.clone(),
         description,
-        order: channel.order.0 as i32,
+        order: channel.order.0,
         is_permanent,
         is_semi_permanent,
         is_default: channel.is_default.unwrap_or(false),
