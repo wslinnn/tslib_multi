@@ -45,6 +45,7 @@
 - 文件权限缺失不再默认允许；权限查询失败只保留 join hint。
 - `User.is_talking` 随音频与 TalkStatus 维护。
 - 逐事件/逐文件/权限计算日志从 info 降到 debug，降低热路径开销。
+- 说话超时改为有序截止时间检查：无人说话时零扫描，有更新时为 O(log n)。
 
 ### Fixed
 

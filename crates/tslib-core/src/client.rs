@@ -8,9 +8,9 @@ use crate::connection::ConnectionState;
 use crate::error::{ConnectionError, Error, Result};
 use crate::events::{AudioCodec, Event, EventHandler};
 use crate::state::{Channel, ServerInfo, ServerState, User};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -226,8 +226,12 @@ pub struct Client {
     channel_id: Option<u64>,
     /// Audio packet sequence number
     audio_sequence: u16,
-    /// Track which users are currently talking (user_id -> last audio timestamp)
+    /// Track which users are currently talking (user_id -> talk timeout deadline)
     talking_users: HashMap<u16, Instant>,
+    /// Ordered talk deadlines; lets the timeout check stop as soon as the
+    /// earliest live deadline is in the future instead of scanning every
+    /// talking user on each event pump (PR-03).
+    talk_deadlines: BTreeSet<(Instant, u16)>,
     /// Pending file downloads: FiletransferHandle id -> (channel_id, path)
     pending_downloads: HashMap<u16, (u64, String)>,
     /// Pending file uploads: FiletransferHandle id -> (channel_id, path, data)
@@ -276,6 +280,7 @@ impl Client {
             channel_id: None,
             audio_sequence: 0,
             talking_users: HashMap::new(),
+            talk_deadlines: BTreeSet::new(),
             pending_downloads: HashMap::new(),
             pending_uploads: HashMap::new(),
             self_input_muted: None,
@@ -517,22 +522,22 @@ impl Client {
     /// Check for users who have stopped talking (no audio received recently)
     fn check_talk_timeouts(&mut self) -> Vec<Event> {
         let now = Instant::now();
-        let mut stopped_users = Vec::new();
-
-        // Find users who haven't sent audio recently
-        self.talking_users.retain(|&user_id, last_audio| {
-            let elapsed = now.duration_since(*last_audio).as_millis();
-            if elapsed > TALK_TIMEOUT_MS {
-                stopped_users.push(user_id);
-                false // Remove from tracking
-            } else {
-                true // Keep tracking
-            }
-        });
-
-        // Generate TalkStatusStop events
         let mut events = Vec::new();
-        for user_id in stopped_users {
+
+        // Deadlines are ordered, so an idle server stops at the first live
+        // deadline instead of scanning every tracked user.
+        while let Some(&(deadline, user_id)) = self.talk_deadlines.iter().next() {
+            if deadline > now {
+                break;
+            }
+            self.talk_deadlines.remove(&(deadline, user_id));
+
+            // Stale entry: the user sent more audio after this deadline.
+            if self.talking_users.get(&user_id) != Some(&deadline) {
+                continue;
+            }
+            self.talking_users.remove(&user_id);
+
             debug!("User {} stopped talking", user_id);
             if let Some(user) = self.server_state.users.get_mut(&user_id) {
                 user.is_talking = false;
@@ -541,6 +546,7 @@ impl Client {
             let _ = self.event_tx.send(event.clone());
             events.push(event);
         }
+
         events
     }
 
@@ -760,7 +766,11 @@ impl Client {
 
                 // Check if this is a new talk session (user wasn't talking before)
                 let was_talking = self.talking_users.contains_key(&from_id);
-                self.talking_users.insert(from_id, Instant::now());
+                let deadline = Instant::now() + Duration::from_millis(TALK_TIMEOUT_MS as u64);
+                if let Some(previous) = self.talking_users.insert(from_id, deadline) {
+                    self.talk_deadlines.remove(&(previous, from_id));
+                }
+                self.talk_deadlines.insert((deadline, from_id));
 
                 if !was_talking {
                     // Emit TalkStatusStart — both via broadcast AND in returned events
@@ -2516,6 +2526,58 @@ mod validation_tests {
         assert!(users[0].is_talking);
     }
 
+    #[test]
+    fn talk_timeout_only_expires_due_users() {
+        let mut client = disconnected_client();
+        for id in [3u16, 7] {
+            client.server_state.users.insert(
+                id,
+                User {
+                    id,
+                    is_talking: true,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let now = Instant::now();
+        let expired = now - Duration::from_millis(TALK_TIMEOUT_MS as u64 + 50);
+        let live = now + Duration::from_secs(60);
+        client.talking_users.insert(3, expired);
+        client.talk_deadlines.insert((expired, 3));
+        client.talking_users.insert(7, live);
+        client.talk_deadlines.insert((live, 7));
+
+        let events = client.check_talk_timeouts();
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            Event::TalkStatusStop { user_id: 3 }
+        ));
+        assert!(!client.talking_users.contains_key(&3));
+        assert!(!client.talk_deadlines.contains(&(expired, 3)));
+        assert!(!client.server_state.users[&3].is_talking);
+        assert!(client.talking_users.contains_key(&7));
+        assert!(client.server_state.users[&7].is_talking);
+    }
+
+    #[test]
+    fn stale_talk_deadline_is_ignored() {
+        let mut client = disconnected_client();
+        let now = Instant::now();
+        let stale = now - Duration::from_secs(1);
+        let live = now + Duration::from_secs(60);
+        client.talking_users.insert(5, live);
+        client.talk_deadlines.insert((stale, 5));
+
+        let events = client.check_talk_timeouts();
+
+        assert!(events.is_empty());
+        assert_eq!(client.talking_users.get(&5), Some(&live));
+        assert!(client.talk_deadlines.is_empty());
+    }
+
     fn disconnected_client() -> Client {
         let config = ClientConfig::builder()
             .address("localhost:9987")
@@ -2536,6 +2598,7 @@ mod validation_tests {
             channel_id: None,
             audio_sequence: 0,
             talking_users: HashMap::new(),
+            talk_deadlines: BTreeSet::new(),
             pending_downloads: HashMap::new(),
             pending_uploads: HashMap::new(),
             self_input_muted: None,
