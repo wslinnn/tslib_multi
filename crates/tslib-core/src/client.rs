@@ -927,9 +927,9 @@ impl Client {
                 debug!("Property changed: {:?}", id);
                 self.handle_property_changed(id, old)
             }
-            TsEvent::PropertyRemoved { id, old, .. } => {
+            TsEvent::PropertyRemoved { id, old, invoker, extra } => {
                 debug!("Property removed: {:?}", id);
-                self.handle_property_removed(id, old)
+                self.handle_property_removed(id, old, invoker.as_ref(), extra.reason.clone())
             }
             TsEvent::Message { target, invoker, message } => {
                 match target {
@@ -1024,6 +1024,13 @@ impl Client {
 
                     if from_channel != user.channel_id {
                         info!("User {} moved from channel {} to {}", user.nickname, from_channel, user.channel_id);
+                        if Some(user.id) == self.client_id {
+                            if let Some(channel) =
+                                self.server_state.channels.get(&user.channel_id).cloned()
+                            {
+                                return Some(Event::ChannelJoined { channel });
+                            }
+                        }
                         return Some(Event::UserMoved {
                             user,
                             from_channel,
@@ -1070,15 +1077,58 @@ impl Client {
     }
 
     /// Handle a property being removed (client left, channel deleted, etc.)
-    fn handle_property_removed(&mut self, id: &PropertyId, _old: &tsclientlib::events::PropertyValue) -> Option<Event> {
+    fn handle_property_removed(
+        &mut self,
+        id: &PropertyId,
+        _old: &tsclientlib::events::PropertyValue,
+        invoker: Option<&tsproto_types::Invoker>,
+        reason: Option<Reason>,
+    ) -> Option<Event> {
         match id {
             PropertyId::Client(client_id) => {
-                // Client disconnected
+                // Client disconnected, kicked, or banned.
                 if let Some(user) = self.server_state.users.remove(&client_id.0) {
                     info!("User left: {} ({})", user.nickname, user.id);
+                    let reason_text = reason
+                        .map(|reason| format!("{reason:?}"))
+                        .unwrap_or_else(|| "Disconnected".to_string());
+                    let kicker = invoker_to_user(invoker, &self.server_state);
+
+                    match reason {
+                        Some(Reason::KickChannel) => {
+                            if let Some(kicker) = kicker {
+                                return Some(Event::UserKickedFromChannel {
+                                    user,
+                                    kicker,
+                                    reason: reason_text,
+                                });
+                            }
+                        }
+                        Some(Reason::KickServer) => {
+                            if let Some(kicker) = kicker {
+                                return Some(Event::UserKickedFromServer {
+                                    user,
+                                    kicker,
+                                    reason: reason_text,
+                                });
+                            }
+                        }
+                        Some(Reason::KickServerBan) => {
+                            if let Some(banner) = kicker {
+                                return Some(Event::UserBanned {
+                                    user,
+                                    banner,
+                                    reason: reason_text,
+                                    duration: None,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+
                     return Some(Event::UserLeft {
                         user,
-                        reason: "Disconnected".to_string(),
+                        reason: reason_text,
                     });
                 }
             }
@@ -2068,6 +2118,28 @@ fn audio_codec_to_codec_type(codec: AudioCodec) -> CodecType {
     }
 }
 
+/// Convert an event invoker into a user snapshot, preferring the live state.
+fn invoker_to_user(
+    invoker: Option<&tsproto_types::Invoker>,
+    state: &ServerState,
+) -> Option<User> {
+    let invoker = invoker?;
+    if let Some(user) = state.users.get(&invoker.id.0) {
+        return Some(user.clone());
+    }
+    let uid = invoker
+        .uid
+        .as_ref()
+        .map(|uid| base64::engine::general_purpose::STANDARD.encode(&uid.0))
+        .unwrap_or_default();
+    Some(User {
+        id: invoker.id.0,
+        uid,
+        nickname: invoker.name.clone(),
+        ..Default::default()
+    })
+}
+
 /// Convert tsclientlib Client to our User type
 fn ts_client_to_user(client: &TsClient) -> User {
     // Convert UID bytes to base64 string
@@ -2337,6 +2409,19 @@ mod validation_tests {
             client.query_channel_permissions(5),
             Err(Error::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn invoker_falls_back_to_a_minimal_user() {
+        let invoker = tsproto_types::Invoker {
+            name: "Kicker".to_string(),
+            id: ClientId(7),
+            uid: None,
+        };
+        let user = invoker_to_user(Some(&invoker), &ServerState::default()).unwrap();
+        assert_eq!(user.id, 7);
+        assert_eq!(user.nickname, "Kicker");
+        assert!(user.uid.is_empty());
     }
 
     fn disconnected_client() -> Client {
