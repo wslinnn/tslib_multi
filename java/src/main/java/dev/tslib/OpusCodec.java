@@ -58,8 +58,25 @@ public class OpusCodec implements AutoCloseable {
      * @throws TsLibException on decoding error
      */
     public byte[] decode(byte[] data) {
+        return decode(data, false);
+    }
+
+    /**
+     * Decode an Opus packet to PCM, optionally using FEC decoding. With
+     * {@code fec = true} this returns the loss-repair audio reconstructed
+     * from the FEC data embedded in this packet — call it on the frame
+     * FOLLOWING a lost one to conceal the loss (the redundancy for frame N
+     * travels inside frame N+1).
+     *
+     * @param data Opus-encoded data
+     * @param fec  true to decode the embedded FEC repair data instead of the
+     *             packet's own audio
+     * @return decoded PCM samples
+     * @throws TsLibException on decoding error
+     */
+    public byte[] decode(byte[] data, boolean fec) {
         checkNotClosed();
-        return nativeDecode(nativePtr, data);
+        return nativeDecode(nativePtr, data, fec);
     }
 
     /**
@@ -133,7 +150,7 @@ public class OpusCodec implements AutoCloseable {
                                              int bitrate, int frameSizeMs);
     private static native void nativeDestroy(long ptr);
     private static native byte[] nativeEncode(long ptr, byte[] pcm);
-    private static native byte[] nativeDecode(long ptr, byte[] data);
+    private static native byte[] nativeDecode(long ptr, byte[] data, boolean fec);
     private static native byte[] nativeDecodePlc(long ptr);
     private static native void nativeSetBitrate(long ptr, int bitrate);
     private static native void nativeSetFec(long ptr, boolean enabled);
