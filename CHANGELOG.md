@@ -32,6 +32,7 @@
 - `PermissionHints { bits, known }` 与 `Channel.permission_hints_known`；Java `Channel.permissionHintsKnown`，Python `Channel.permission_hints(_known)`。
 - `Event::ChannelPermissionsUpdated` 新增 `known` 字段。
 - `AudioStats` / `CaptureStats` / `PlaybackStats` 与 `AudioManager::stats`、`CaptureDevice::stats`、`PlaybackDevice::stats`（采集丢帧、回调争用、播放静音块、解码/PLC 次数、解码器数量）。
+- `Client::users_snapshot` / `channels_snapshot`，事件泵之间重复读取共享同一份 `Arc` 快照；旧 `users()`/`channels()` 保持返回 `Vec`。
 
 ### Changed
 

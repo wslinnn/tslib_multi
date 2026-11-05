@@ -275,6 +275,10 @@ pub struct Client {
     /// sequence, payload, whisper flag) instead of being emitted
     /// as an `AudioReceived` event (which waits for the next event pull).
     audio_sink: Option<Arc<dyn Fn(u16, u16, &[u8], bool) + Send + Sync>>,
+    /// Cached user snapshot for repeated UI polling
+    users_snapshot: Option<Arc<[User]>>,
+    /// Cached channel snapshot for repeated UI polling
+    channels_snapshot: Option<Arc<[Channel]>>,
 }
 
 impl Client {
@@ -308,6 +312,8 @@ impl Client {
             whisper_clients: Vec::new(),
             whisper_channels: Vec::new(),
             audio_sink: None,
+            users_snapshot: None,
+            channels_snapshot: None,
         };
 
         // Establish connection
@@ -435,6 +441,7 @@ impl Client {
             self.dispatch_event(event.clone()).await;
         }
 
+        self.invalidate_snapshots();
         Ok(events)
     }
 
@@ -512,6 +519,7 @@ impl Client {
             self.dispatch_event(event.clone()).await;
         }
 
+        self.invalidate_snapshots();
         Ok(events)
     }
 
@@ -1263,6 +1271,7 @@ impl Client {
             self.server_state.channels.len()
         );
 
+        self.invalidate_snapshots();
         Ok(())
     }
 
@@ -1681,11 +1690,34 @@ impl Client {
 
     /// Get all channels from tsclientlib state
     pub fn channels(&self) -> Vec<Channel> {
+        self.build_channels()
+    }
+
+    fn build_channels(&self) -> Vec<Channel> {
         self.server_state.channels.values().cloned().collect()
+    }
+
+    /// All channels as a shared, cached snapshot.
+    ///
+    /// The snapshot is rebuilt after an event pump or a state mutation, so
+    /// repeated UI reads in one frame share a single allocation. The returned
+    /// slice is immutable; use [`Self::channels`] when an owned `Vec` is
+    /// required.
+    pub fn channels_snapshot(&mut self) -> Arc<[Channel]> {
+        if let Some(snapshot) = &self.channels_snapshot {
+            return Arc::clone(snapshot);
+        }
+        let snapshot: Arc<[Channel]> = self.build_channels().into();
+        self.channels_snapshot = Some(Arc::clone(&snapshot));
+        snapshot
     }
 
     /// Get all users from tsclientlib state
     pub fn users(&self) -> Vec<User> {
+        self.build_users()
+    }
+
+    fn build_users(&self) -> Vec<User> {
         let mut users: Vec<User> = self.server_state.users.values().cloned().collect();
         for user in &mut users {
             user.is_talking = self.talking_users.contains_key(&user.id);
@@ -1699,6 +1731,26 @@ impl Client {
             }
         }
         users
+    }
+
+    /// All users as a shared, cached snapshot.
+    ///
+    /// The snapshot is rebuilt after an event pump or a state mutation, so
+    /// repeated UI reads in one frame share a single allocation. The returned
+    /// slice is immutable; use [`Self::users`] when an owned `Vec` is required.
+    pub fn users_snapshot(&mut self) -> Arc<[User]> {
+        if let Some(snapshot) = &self.users_snapshot {
+            return Arc::clone(snapshot);
+        }
+        let snapshot: Arc<[User]> = self.build_users().into();
+        self.users_snapshot = Some(Arc::clone(&snapshot));
+        snapshot
+    }
+
+    /// Drop cached snapshots after a state mutation.
+    fn invalidate_snapshots(&mut self) {
+        self.users_snapshot = None;
+        self.channels_snapshot = None;
     }
 
     /// Get all users directly from tsclientlib's connection state.
@@ -2318,6 +2370,7 @@ impl Client {
         // Track locally — tsclientlib's state book won't reflect this
         // because the server doesn't echo clientupdate back to the sender.
         self.self_input_muted = Some(muted);
+        self.invalidate_snapshots();
 
         // Also patch server_state immediately
         if let Some(client_id) = self.client_id {
@@ -2751,6 +2804,39 @@ mod validation_tests {
     }
 
     #[test]
+    fn snapshots_are_shared_until_invalidated() {
+        let mut client = disconnected_client();
+        client.server_state.users.insert(
+            1,
+            User {
+                id: 1,
+                ..Default::default()
+            },
+        );
+        client.server_state.channels.insert(
+            10,
+            Channel {
+                id: 10,
+                ..Default::default()
+            },
+        );
+
+        let users_a = client.users_snapshot();
+        let users_b = client.users_snapshot();
+        assert!(Arc::ptr_eq(&users_a, &users_b));
+        assert_eq!(users_a.len(), 1);
+
+        let channels_a = client.channels_snapshot();
+        let channels_b = client.channels_snapshot();
+        assert!(Arc::ptr_eq(&channels_a, &channels_b));
+        assert_eq!(channels_a.len(), 1);
+
+        client.invalidate_snapshots();
+        let users_c = client.users_snapshot();
+        assert!(!Arc::ptr_eq(&users_a, &users_c));
+    }
+
+    #[test]
     fn talk_timeout_only_expires_due_users() {
         let mut client = disconnected_client();
         for id in [3u16, 7] {
@@ -2833,6 +2919,8 @@ mod validation_tests {
             whisper_clients: Vec::new(),
             whisper_channels: Vec::new(),
             audio_sink: None,
+            users_snapshot: None,
+            channels_snapshot: None,
         }
     }
 
