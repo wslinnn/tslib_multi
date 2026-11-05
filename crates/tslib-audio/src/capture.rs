@@ -2,6 +2,7 @@
 
 use crate::config::AudioConfig;
 use crate::error::{AudioError, Result};
+use crate::resample::{map_channels, LinearResampler};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,12 @@ struct CaptureState {
     vad_threshold: AtomicU64,
     /// VAD enabled
     vad_enabled: AtomicBool,
+    /// Automatic gain control enabled
+    agc_enabled: AtomicBool,
+    /// AGC target level (scaled by 1000)
+    agc_target: AtomicU64,
+    /// Noise suppression enabled
+    noise_suppression: AtomicBool,
     /// Captured frame counter
     frames_captured: AtomicU64,
     /// Dropped frame counter
@@ -56,6 +63,9 @@ impl CaptureState {
             volume: AtomicU64::new((config.input_volume * 100.0) as u64),
             vad_threshold: AtomicU64::new((config.vad_threshold * 1000.0) as u64),
             vad_enabled: AtomicBool::new(config.vad_enabled),
+            agc_enabled: AtomicBool::new(config.agc_enabled),
+            agc_target: AtomicU64::new((config.agc_target.abs() * 1000.0) as u64),
+            noise_suppression: AtomicBool::new(config.noise_suppression),
             frames_captured: AtomicU64::new(0),
             frames_dropped: AtomicU64::new(0),
             callbacks_dropped: AtomicU64::new(0),
@@ -208,18 +218,20 @@ impl CaptureDevice {
 
         debug!("Using capture device: {:?}", device.name());
 
-        // Configure the stream
-        let config = cpal::StreamConfig {
-            channels: self.config.channels,
-            sample_rate: cpal::SampleRate(self.config.sample_rate),
-            buffer_size: cpal::BufferSize::Default,
-        };
+        // Negotiate a supported device format and enable resampling when the
+        // device cannot run at the requested 48 kHz (FR-AU-05/08).
+        let (config, device_channels, resampler) =
+            negotiate_input_config(&device, self.config.sample_rate, self.config.channels)?;
 
         let frame_size = self.config.frame_size_samples();
         let channels = self.config.channels as usize;
         let state = self.state.clone();
         let start_time = Instant::now();
         self.start_time = Some(start_time);
+        let mut resampler = resampler;
+        let mut high_pass_x = 0.0f32;
+        let mut high_pass_y = 0.0f32;
+        let mut agc_gain = 1.0f32;
 
         // Buffer to accumulate samples
         let buffer: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::with_capacity(frame_size * channels * 2)));
@@ -238,20 +250,40 @@ impl CaptureDevice {
                     let volume = state.get_volume();
                     let vad_threshold = state.get_vad_threshold();
                     let vad_enabled = state.vad_enabled.load(Ordering::Relaxed);
+                    let agc_enabled = state.agc_enabled.load(Ordering::Relaxed);
+                    let agc_target = state.agc_target.load(Ordering::Relaxed) as f32 / 1000.0;
+                    let noise_suppression = state.noise_suppression.load(Ordering::Relaxed);
 
                     // Convert f32 to i16 and apply volume directly into the
-                    // accumulation buffer (no intermediate Vec). Never block
-                    // the realtime capture thread on this lock; a contended
-                    // callback is dropped rather than stalling the device.
+                    // accumulation buffer. Never block the realtime capture
+                    // thread on this lock; a contended callback is dropped
+                    // rather than stalling the device.
                     let Ok(mut buf) = buffer_clone.try_lock() else {
                         state.callbacks_dropped.fetch_add(1, Ordering::Relaxed);
                         return;
                     };
-                    buf.reserve(data.len());
-                    buf.extend(data.iter().map(|&s| {
-                        let amplified = s * volume;
-                        (amplified.clamp(-1.0, 1.0) * 32767.0) as i16
-                    }));
+                    let convert = |sample: f32| -> i16 {
+                        (sample.clamp(-1.0, 1.0) * 32767.0) as i16
+                    };
+
+                    if device_channels == channels && resampler.is_none() {
+                        // Fast path: no channel mapping or resampling.
+                        buf.reserve(data.len());
+                        buf.extend(data.iter().map(|&sample| convert(sample * volume)));
+                    } else {
+                        let mapped = if device_channels == channels {
+                            data.to_vec()
+                        } else {
+                            map_channels(data, device_channels, channels)
+                        };
+                        let scaled: Vec<f32> =
+                            mapped.iter().map(|&sample| sample * volume).collect();
+                        let resampled: &[f32] = match resampler.as_mut() {
+                            Some(resampler) => resampler.process(&scaled),
+                            None => &scaled,
+                        };
+                        buf.extend(resampled.iter().map(|&sample| convert(sample)));
+                    }
 
                     // Check if we have enough for a frame
                     let samples_per_frame = frame_size * channels;
@@ -261,6 +293,19 @@ impl CaptureDevice {
                         frame_samples
                             .extend_from_slice(&buf[consumed..consumed + samples_per_frame]);
                         consumed += samples_per_frame;
+
+                        // Noise suppression (high-pass) and AGC run before VAD
+                        // and encoding, so both see the processed signal.
+                        if noise_suppression {
+                            high_pass(
+                                &mut frame_samples,
+                                &mut high_pass_x,
+                                &mut high_pass_y,
+                            );
+                        }
+                        if agc_enabled {
+                            apply_agc(&mut frame_samples, agc_target, &mut agc_gain);
+                        }
 
                         // Calculate voice activity
                         let voice_activity = if vad_enabled {
@@ -373,9 +418,97 @@ impl CaptureDevice {
     }
 }
 
+/// Pick the closest supported f32 input format and a resampler when the
+/// device cannot run at the requested rate.
+fn negotiate_input_config(
+    device: &cpal::Device,
+    requested_rate: u32,
+    requested_channels: u16,
+) -> Result<(cpal::StreamConfig, usize, Option<LinearResampler>)> {
+    let ranges = device.supported_input_configs().map_err(|e| {
+        AudioError::DeviceInit(format!("failed to query input formats: {e}"))
+    })?;
+
+    let mut formats = String::new();
+    let mut candidates = Vec::new();
+    for range in ranges {
+        formats.push_str(&format!(
+            " {}ch {}-{}Hz {:?};",
+            range.channels(),
+            range.min_sample_rate().0,
+            range.max_sample_rate().0,
+            range.sample_format()
+        ));
+        if range.sample_format() != cpal::SampleFormat::F32 {
+            continue;
+        }
+        let rate = requested_rate.clamp(range.min_sample_rate().0, range.max_sample_rate().0);
+        let channels = range.channels();
+        let score = (
+            u8::from(channels != requested_channels),
+            rate.abs_diff(requested_rate),
+            channels.abs_diff(requested_channels),
+        );
+        candidates.push((score, range.with_sample_rate(cpal::SampleRate(rate))));
+    }
+
+    let Some(best) = candidates
+        .into_iter()
+        .min_by_key(|(score, _)| *score)
+        .map(|(_, config)| config)
+    else {
+        return Err(AudioError::DeviceInit(format!(
+            "device has no f32 input format; supported:{formats}"
+        )));
+    };
+
+    let device_channels = best.channels() as usize;
+    let device_rate = best.sample_rate().0;
+    let mut stream_config = best.config();
+    stream_config.buffer_size = cpal::BufferSize::Default;
+    let resampler = LinearResampler::new(device_rate, requested_rate);
+
+    Ok((stream_config, device_channels, resampler))
+}
+
+/// First-order high-pass (~80 Hz at 48 kHz) used as lightweight noise
+/// suppression: removes DC offset and low-frequency rumble without gating
+/// speech.
+fn high_pass(samples: &mut [i16], previous_input: &mut f32, previous_output: &mut f32) {
+    const ALPHA: f32 = 0.995;
+    for sample in samples {
+        let input = *sample as f32;
+        let output = ALPHA * (*previous_output + input - *previous_input);
+        *previous_input = input;
+        *previous_output = output;
+        *sample = output.clamp(-32768.0, 32767.0) as i16;
+    }
+}
+
+/// Gentle automatic gain control: move the frame RMS toward `target`
+/// (linear full-scale, e.g. 0.125 for -18 dBFS) with a slow, bounded gain.
+fn apply_agc(samples: &mut [i16], target: f32, gain: &mut f32) {
+    if samples.is_empty() || target <= 0.0 {
+        return;
+    }
+    let sum: f64 = samples
+        .iter()
+        .map(|&sample| (sample as f64).powi(2))
+        .sum();
+    let rms = (sum / samples.len() as f64).sqrt() as f32 / 32768.0;
+    if rms < 1e-5 {
+        return;
+    }
+
+    let desired = (target / rms).clamp(0.5, 2.0);
+    *gain = 0.99 * *gain + 0.01 * desired;
+    for sample in samples {
+        *sample = ((*sample as f32) * *gain).clamp(-32768.0, 32767.0) as i16;
+    }
+}
+
 /// Calculate voice activity detection based on RMS energy
-fn calculate_vad(samples: &[i16], threshold: f32) -> bool {
-    if samples.is_empty() {
+fn calculate_vad(samples: &[i16], threshold: f32) -> bool {    if samples.is_empty() {
         return false;
     }
 
@@ -476,5 +609,26 @@ mod tests {
     fn vad_detects_energy() {
         assert!(!calculate_vad(&[0i16; 960], 0.3));
         assert!(calculate_vad(&[10_000i16; 960], 0.3));
+    }
+
+    #[test]
+    fn high_pass_removes_dc() {
+        let mut samples = [1000i16; 960];
+        let mut previous_input = 0.0;
+        let mut previous_output = 0.0;
+        high_pass(&mut samples, &mut previous_input, &mut previous_output);
+        assert!(samples[959].abs() < 100);
+    }
+
+    #[test]
+    fn agc_moves_quiet_frames_toward_target() {
+        let mut gain = 1.0f32;
+        let mut samples = vec![500i16; 960];
+        for _ in 0..200 {
+            samples.fill(500);
+            apply_agc(&mut samples, 0.125, &mut gain);
+        }
+        assert!(gain > 1.5);
+        assert!(samples[0] > 500);
     }
 }

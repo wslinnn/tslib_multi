@@ -49,6 +49,12 @@
 - `Client::download_file_to_path(_with_password)` / `upload_file_from_path(_with_password)`：路径式流式传输，支持 offset/resume。
 - `Client::get_file_info`、`list_file_transfers`、`stop_file_transfer` 公开 `ftgetfileinfo`/`ftlist`/`ftstop`。
 - 新事件 `FileDownloadedToPath`、`FileInfoReceived`、`FileTransfersListed`、`FileTransferStopped`。
+- `LinearResampler` / `map_channels`，采集与播放按设备实际采样率/声道重采样。
+- 设备格式协商：优先 48 kHz/目标声道，否则选择最接近的 f32 配置并重采样；错误包含支持格式。
+- `EchoCancellation` 枚举（Disabled/Speex/Aec3）、`AudioManager::set_echo_engine`，播放输出作为 AEC far-end 参考。
+- AGC/NS 接线：高通的噪声抑制与平滑 AGC 在采集帧上生效。
+- `AudioManager::restart_capture/restart_playback`，供 Android 路由切换使用。
+- `PlaybackStats.underruns`（mixer 空缓冲次数）与 `AudioStats` 汇总。
 
 ### Changed
 
@@ -83,6 +89,8 @@
 - `Client::users()` / `channels()` 改为返回 `Arc<[User]>` / `Arc<[Channel]>`，事件泵/状态变更后重建；`users_snapshot` / `channels_snapshot` 作为弃用别名。
 - 初始输入静音改为由 `ClientConfig.initial_input_muted` 控制，默认仍为 `true`。
 - `auto_reconnect` / `reconnect_delay` / `max_reconnect_attempts` 标记 `#[deprecated]`（重连策略由依赖层负责）。
+- `AudioConfig.echo_cancellation` 由 `bool` 改为 `EchoCancellation` 枚举；`playback_buffer_ms` 默认 60 → 40。
+- `AudioManager::process_incoming` 复用每用户 PCM 缓冲，减少逐包分配。
 - `ChannelTree::remove_channel` 删除整棵子树（与服务器行为一致）；新增 `remove_subtree` 返回全部被删频道。
 - `ChannelTree::update_channel` 统一重建结构，拒绝把频道挂到自己的后代下；`path_to`/`print_tree` 遇环终止。
 

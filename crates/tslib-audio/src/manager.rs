@@ -2,11 +2,12 @@
 
 use crate::capture::{CaptureDevice, CaptureStats, SampleBufferPool, VoiceActivityDetector};
 use crate::codec::{Decoder, Encoder, OpusCodec, OpusDecoder, OpusEncoder};
-use crate::config::{AudioConfig, DecoderPoolConfig};
+use crate::config::{AudioConfig, DecoderPoolConfig, EchoCancellation};
+use crate::echo::{EchoEngine, SpeexEchoEngine};
 use crate::error::{AudioError, Result};
 use crate::jitter::{JitterBuffer, JitterOutput};
 use crate::playback::{PlaybackDevice, PlaybackStats};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -16,6 +17,8 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 struct DecoderSlot {
     decoder: OpusDecoder,
     last_active: Instant,
+    /// Reused PCM scratch buffer (one frame).
+    samples: Vec<i16>,
 }
 
 /// Per-user fixed-delay jitter buffer and the codec of its stream.
@@ -41,6 +44,8 @@ pub struct AudioManager {
     decoders: Arc<RwLock<HashMap<u16, DecoderSlot>>>,
     /// Fixed-delay jitter buffers (one per speaking user)
     jitter: Arc<RwLock<HashMap<u16, JitterEntry>>>,
+    /// Optional echo-cancellation engine (Speex built in, AEC3 injected)
+    echo_engine: StdMutex<Option<Box<dyn EchoEngine>>>,
     /// Last time the decoder cache was swept for idle users
     last_sweep: StdMutex<Instant>,
     /// Successfully decoded incoming packets
@@ -103,6 +108,7 @@ impl AudioManager {
             encoder: Arc::new(Mutex::new(encoder)),
             decoders: Arc::new(RwLock::new(HashMap::new())),
             jitter: Arc::new(RwLock::new(HashMap::new())),
+            echo_engine: StdMutex::new(None),
             last_sweep: StdMutex::new(Instant::now()),
             decoded_packets: AtomicU64::new(0),
             plc_frames: AtomicU64::new(0),
@@ -124,6 +130,31 @@ impl AudioManager {
             .start_with_pool(frame_tx, sample_pool.clone())?;
         *self.is_capturing.write().await = true;
 
+        // Echo cancellation: an injected engine wins; otherwise Speex is
+        // created when configured. AEC3 engines are injected by the app.
+        let frame_samples =
+            self.config.frame_size_samples() * self.config.channels as usize;
+        let mut echo_engine = self
+            .echo_engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if echo_engine.is_none()
+            && self.config.echo_cancellation == EchoCancellation::Speex
+        {
+            match SpeexEchoEngine::new(
+                self.config.sample_rate,
+                frame_samples,
+                self.config.sample_rate as usize / 4,
+            ) {
+                Ok(engine) => echo_engine = Some(Box::new(engine)),
+                Err(error) => {
+                    tracing::warn!("Echo cancellation disabled: {error}");
+                }
+            }
+        }
+        let echo_reference = self.playback.lock().await.reference_buffer();
+
         // Spawn encoding task
         let encoder = self.encoder.clone();
         let vad = self.vad.clone();
@@ -133,15 +164,36 @@ impl AudioManager {
         tokio::spawn(async move {
             let mut sequence = 0u16;
             let mut encode_buffer = vec![0u8; 1024];
+            let mut aec_buffer: Vec<i16> = Vec::new();
+            let mut far_buffer: Vec<i16> = vec![0i16; frame_samples];
 
             while *is_capturing.read().await {
                 match frame_rx.recv().await {
                     Some(frame) => {
                         let samples = frame.samples;
 
+                        // Echo cancellation runs before VAD so the encoder
+                        // only sees the cleaned signal.
+                        let processed: &[i16] = if let Some(engine) = echo_engine.as_mut() {
+                            if far_buffer.len() != samples.len() {
+                                far_buffer.resize(samples.len(), 0);
+                            }
+                            fill_reference_frame(&echo_reference, &mut far_buffer);
+                            aec_buffer.resize(samples.len(), 0);
+                            match engine.process(&samples, &far_buffer, &mut aec_buffer) {
+                                Ok(len) => &aec_buffer[..len],
+                                Err(error) => {
+                                    tracing::warn!("Echo cancellation failed: {error}");
+                                    &samples
+                                }
+                            }
+                        } else {
+                            &samples
+                        };
+
                         // Check VAD
                         let voice_activity = if vad_enabled {
-                            vad.lock().await.process(&samples)
+                            vad.lock().await.process(processed)
                         } else {
                             true
                         };
@@ -150,7 +202,7 @@ impl AudioManager {
                         if voice_activity {
                             let encoded = {
                                 let mut enc = encoder.lock().await;
-                                enc.encode(&samples, &mut encode_buffer)
+                                enc.encode(processed, &mut encode_buffer)
                             };
                             sample_pool.recycle(samples);
 
@@ -198,68 +250,81 @@ impl AudioManager {
         self.playback.lock().await.stop()
     }
 
+    /// Restart capture after an audio-route change (Bluetooth/headset).
+    pub async fn restart_capture(&self) -> Result<mpsc::Receiver<EncodedPacket>> {
+        self.stop_capture().await?;
+        self.start_capture().await
+    }
+
+    /// Restart playback after an audio-route change (Bluetooth/headset).
+    pub async fn restart_playback(&self) -> Result<()> {
+        self.stop_playback().await?;
+        self.start_playback().await
+    }
+
     /// Process incoming audio from a user
     pub async fn process_incoming(&self, user_id: u16, data: &[u8], codec: u8) -> Result<()> {
         ensure_opus_codec(codec)?;
 
-        let mut samples =
-            vec![0i16; self.config.frame_size_samples() * self.config.channels as usize];
+        let needed = self.config.frame_size_samples() * self.config.channels as usize;
         let now = Instant::now();
 
-        let decoded = {
-            let mut decoders = self.decoders.write().await;
-            self.sweep_if_due(&mut decoders, now);
+        let mut decoders = self.decoders.write().await;
+        self.sweep_if_due(&mut decoders, now);
 
-            if !decoders.contains_key(&user_id) {
-                let decoder = OpusDecoder::new(&self.config)?;
-                decoders.insert(
-                    user_id,
-                    DecoderSlot {
-                        decoder,
-                        last_active: now,
-                    },
-                );
-                enforce_decoder_limit(
-                    &mut decoders,
-                    self.config.decoder_pool.max_decoders,
-                    Some(user_id),
-                );
-            }
+        if !decoders.contains_key(&user_id) {
+            let decoder = OpusDecoder::new(&self.config)?;
+            decoders.insert(
+                user_id,
+                DecoderSlot {
+                    decoder,
+                    last_active: now,
+                    samples: vec![0i16; needed],
+                },
+            );
+            enforce_decoder_limit(
+                &mut decoders,
+                self.config.decoder_pool.max_decoders,
+                Some(user_id),
+            );
+        }
 
-            let slot = decoders
-                .get_mut(&user_id)
-                .expect("decoder was just inserted");
-            slot.last_active = now;
-            let decoded = slot.decoder.decode(data, &mut samples)?;
-            self.decoded_packets.fetch_add(1, Ordering::Relaxed);
-            decoded
-        };
+        let slot = decoders
+            .get_mut(&user_id)
+            .expect("decoder was just inserted");
+        slot.last_active = now;
+        if slot.samples.len() < needed {
+            slot.samples.resize(needed, 0);
+        }
+        let decoded = slot.decoder.decode(data, &mut slot.samples)?;
+        self.decoded_packets.fetch_add(1, Ordering::Relaxed);
 
-        // Add to playback mixer
+        // Reusing the per-user buffer avoids one allocation per packet. The
+        // playback lock is only taken for the copy into the mixer.
         let playback = self.playback.lock().await;
-        playback.add_user_audio(user_id, &samples[..decoded]);
+        playback.add_user_audio(user_id, &slot.samples[..decoded]);
 
         Ok(())
     }
 
     /// Handle packet loss for a user
     pub async fn handle_packet_loss(&self, user_id: u16) -> Result<()> {
+        let needed = self.config.frame_size_samples() * self.config.channels as usize;
         let now = Instant::now();
-        let (samples, decoded) = {
-            let mut decoders = self.decoders.write().await;
-            let Some(slot) = decoders.get_mut(&user_id) else {
-                return Ok(());
-            };
-            slot.last_active = now;
-            let mut samples =
-                vec![0i16; self.config.frame_size_samples() * self.config.channels as usize];
-            let decoded = slot.decoder.decode_plc(&mut samples)?;
-            self.plc_frames.fetch_add(1, Ordering::Relaxed);
-            (samples, decoded)
+
+        let mut decoders = self.decoders.write().await;
+        let Some(slot) = decoders.get_mut(&user_id) else {
+            return Ok(());
         };
+        slot.last_active = now;
+        if slot.samples.len() < needed {
+            slot.samples.resize(needed, 0);
+        }
+        let decoded = slot.decoder.decode_plc(&mut slot.samples)?;
+        self.plc_frames.fetch_add(1, Ordering::Relaxed);
 
         let playback = self.playback.lock().await;
-        playback.add_user_audio(user_id, &samples[..decoded]);
+        playback.add_user_audio(user_id, &slot.samples[..decoded]);
         Ok(())
     }
 
@@ -340,6 +405,18 @@ impl AudioManager {
     /// Set input volume
     pub async fn set_input_volume(&self, volume: f32) -> Result<()> {
         self.capture.lock().await.set_volume(volume)
+    }
+
+    /// Inject an echo-cancellation engine.
+    ///
+    /// `AudioConfig.echo_cancellation = Speex` creates one automatically;
+    /// `Aec3` (from `tslib-audio-aec3`) must be injected here before
+    /// [`Self::start_capture`]. Passing `None` disables cancellation.
+    pub fn set_echo_engine(&self, engine: Option<Box<dyn EchoEngine>>) {
+        *self
+            .echo_engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = engine;
     }
 
     /// Set output volume
@@ -490,6 +567,20 @@ impl AudioManager {
     }
 }
 
+/// Copy the most recent playback samples into `out`, zero-padding the front
+/// when the reference ring has not filled yet.
+fn fill_reference_frame(reference: &StdMutex<VecDeque<i16>>, out: &mut [i16]) {
+    let mut ring = reference.lock().unwrap_or_else(|e| e.into_inner());
+    while ring.len() > out.len() {
+        ring.pop_front();
+    }
+    let skip = out.len().saturating_sub(ring.len());
+    out[..skip].fill(0);
+    for (index, sample) in ring.drain(..).enumerate() {
+        out[skip + index] = sample;
+    }
+}
+
 /// Interval between automatic idle sweeps. A short idle timeout is swept at
 /// the same scale so tests and aggressive configurations take effect promptly.
 fn sweep_interval(pool: &DecoderPoolConfig) -> Duration {
@@ -548,6 +639,11 @@ mod tests {
                 DecoderSlot {
                     decoder: OpusDecoder::new(&audio.config).unwrap(),
                     last_active,
+                    samples: vec![
+                        0i16;
+                        audio.config.frame_size_samples()
+                            * audio.config.channels as usize
+                    ],
                 },
             );
         }

@@ -26,8 +26,8 @@ pub struct AudioConfig {
     pub agc_target: f32,
     /// Noise suppression enabled
     pub noise_suppression: bool,
-    /// Echo cancellation enabled (planned)
-    pub echo_cancellation: bool,
+    /// Echo cancellation engine
+    pub echo_cancellation: EchoCancellation,
     /// Input device name (None for default)
     pub input_device: Option<String>,
     /// Output device name (None for default)
@@ -59,12 +59,12 @@ impl Default for AudioConfig {
             agc_enabled: true,
             agc_target: -18.0,
             noise_suppression: true,
-            echo_cancellation: false, // Not implemented yet
+            echo_cancellation: EchoCancellation::Disabled,
             input_device: None,
             output_device: None,
             input_volume: 1.0,
             output_volume: 1.0,
-            playback_buffer_ms: 60,
+            playback_buffer_ms: 40,
             decoder_pool: DecoderPoolConfig::default(),
             jitter_buffer: JitterBufferConfig::default(),
         }
@@ -102,6 +102,19 @@ impl AudioConfig {
     pub fn playback_buffer_samples(&self) -> usize {
         (self.sample_rate * self.playback_buffer_ms / 1000) as usize
     }
+}
+
+/// Echo cancellation engine selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EchoCancellation {
+    /// No echo cancellation.
+    #[default]
+    Disabled,
+    /// speexdsp adaptive filter (built in).
+    Speex,
+    /// WebRTC AEC3; the app injects an engine from `tslib-audio-aec3` with
+    /// [`crate::AudioManager::set_echo_engine`].
+    Aec3,
 }
 
 /// Fixed-delay jitter buffer configuration for incoming voice.
@@ -239,7 +252,7 @@ mod tests {
         assert_eq!(cfg.opus_application, OpusApplication::Voip);
         assert!(cfg.vad_enabled);
         assert!(cfg.noise_suppression);
-        assert!(!cfg.echo_cancellation);
+        assert_eq!(cfg.echo_cancellation, EchoCancellation::Disabled);
         assert_eq!(cfg.input_volume, 1.0);
         assert_eq!(cfg.output_volume, 1.0);
     }
@@ -283,8 +296,15 @@ mod tests {
     #[test]
     fn playback_buffer_samples() {
         let cfg = AudioConfig::default();
-        // 48000 * 60 / 1000 = 2880
-        assert_eq!(cfg.playback_buffer_samples(), 2880);
+        // 48000 * 40 / 1000 = 1920
+        assert_eq!(cfg.playback_buffer_samples(), 1920);
+    }
+
+    #[test]
+    fn latency_budget_defaults_within_target() {
+        let cfg = AudioConfig::default();
+        let budget = cfg.jitter_buffer.target_delay_ms + cfg.playback_buffer_ms;
+        assert!(budget <= 120, "default latency budget is {budget} ms");
     }
 
     #[test]

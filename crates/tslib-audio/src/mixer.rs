@@ -16,6 +16,8 @@ pub struct AudioMixer {
     sample_rate: u32,
     /// Reused per-user read scratch space (avoids allocating per callback)
     temp: Vec<i16>,
+    /// Callbacks that produced no audio because every user buffer was empty
+    underruns: u64,
 }
 
 impl AudioMixer {
@@ -27,6 +29,7 @@ impl AudioMixer {
             buffer_capacity,
             sample_rate,
             temp: Vec::new(),
+            underruns: 0,
         }
     }
 
@@ -54,14 +57,19 @@ impl AudioMixer {
         }
 
         // Mix all active users
+        let mut max_read = 0usize;
         for buffer in self.user_buffers.values_mut() {
             let samples_read = buffer.read(&mut self.temp);
+            max_read = max_read.max(samples_read);
 
             // Add to output with saturation
             for i in 0..samples_read {
                 let mixed = output[i] as i32 + self.temp[i] as i32;
                 output[i] = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             }
+        }
+        if max_read == 0 && !output.is_empty() {
+            self.underruns = self.underruns.saturating_add(1);
         }
 
         // Apply master volume
@@ -122,6 +130,11 @@ impl AudioMixer {
             .filter(|b| b.available() > 0)
             .count()
     }
+
+    /// Callbacks that produced silence because all buffers were empty.
+    pub fn underruns(&self) -> u64 {
+        self.underruns
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +155,13 @@ mod tests {
 
         // Output should be sum of both
         assert_eq!(output[0], 1500);
+    }
+
+    #[test]
+    fn mix_counts_underruns() {
+        let mut mixer = AudioMixer::new(48000, 4800);
+        let mut output = vec![0i16; 960];
+        mixer.mix(&mut output);
+        assert_eq!(mixer.underruns(), 1);
     }
 }

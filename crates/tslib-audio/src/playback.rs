@@ -4,7 +4,9 @@ use crate::capture::DeviceInfo;
 use crate::config::AudioConfig;
 use crate::error::{AudioError, Result};
 use crate::mixer::AudioMixer;
+use crate::resample::{map_channels, LinearResampler};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error};
@@ -18,6 +20,8 @@ pub struct PlaybackDevice {
     mixer: Arc<Mutex<AudioMixer>>,
     /// Shared playback state
     state: Arc<PlaybackState>,
+    /// Recent speaker output, used as the echo-cancellation far-end reference
+    reference: Arc<Mutex<VecDeque<i16>>>,
 }
 
 /// Counters for the realtime playback path.
@@ -25,6 +29,8 @@ pub struct PlaybackDevice {
 pub struct PlaybackStats {
     /// Output blocks replaced with silence because the mixer was locked.
     pub dropped_blocks: u64,
+    /// Output blocks that contained no user audio (buffer underrun).
+    pub underruns: u64,
 }
 
 /// Shared state between playback thread and main thread
@@ -57,18 +63,25 @@ impl PlaybackDevice {
         let buffer_capacity = config.playback_buffer_samples() * 4; // Extra capacity for buffering
         let mixer = Arc::new(Mutex::new(AudioMixer::new(config.sample_rate, buffer_capacity)));
         let state = Arc::new(PlaybackState::new(config.output_volume));
+        let reference_capacity = config.frame_size_samples() * config.channels as usize * 2;
 
         Ok(Self {
             config,
             stream: None,
             mixer,
             state,
+            reference: Arc::new(Mutex::new(VecDeque::with_capacity(reference_capacity))),
         })
     }
 
     /// Get a reference to the mixer for adding audio
     pub fn mixer(&self) -> Arc<Mutex<AudioMixer>> {
         self.mixer.clone()
+    }
+
+    /// Recent speaker output (far-end reference for echo cancellation).
+    pub fn reference_buffer(&self) -> Arc<Mutex<VecDeque<i16>>> {
+        self.reference.clone()
     }
 
     /// List available playback devices
@@ -122,16 +135,17 @@ impl PlaybackDevice {
 
         debug!("Using playback device: {:?}", device.name());
 
-        // Configure the stream
-        let config = cpal::StreamConfig {
-            channels: self.config.channels,
-            sample_rate: cpal::SampleRate(self.config.sample_rate),
-            buffer_size: cpal::BufferSize::Default,
-        };
+        // Negotiate a supported device format and resample when necessary.
+        let (config, device_channels, device_rate, mut resampler) =
+            negotiate_output_config(&device, self.config.sample_rate, self.config.channels)?;
 
         let mixer = self.mixer.clone();
         let state = self.state.clone();
-        let _channels = self.config.channels as usize;
+        let config_channels = self.config.channels as usize;
+        let config_rate = self.config.sample_rate;
+        let reference = self.reference.clone();
+        let reference_capacity =
+            self.config.frame_size_samples() * self.config.channels as usize * 2;
         // Scratch buffer owned by the audio callback (allocated once).
         let mut pcm_buffer: Vec<i16> = Vec::new();
 
@@ -149,11 +163,20 @@ impl PlaybackDevice {
                     }
 
                     let volume = state.get_volume();
+                    let frames = data.len() / device_channels.max(1);
+                    let needed_frames = if resampler.is_some() {
+                        ((frames as f64 * config_rate as f64 / device_rate as f64).round()
+                            as usize)
+                            .max(1)
+                    } else {
+                        frames
+                    };
+                    let needed_samples = needed_frames * config_channels;
 
                     // Reuse the PCM scratch buffer across callbacks; only the
                     // first callback (or a larger device buffer) allocates.
-                    if pcm_buffer.len() != data.len() {
-                        pcm_buffer.resize(data.len(), 0);
+                    if pcm_buffer.len() != needed_samples {
+                        pcm_buffer.resize(needed_samples, 0);
                     }
 
                     {
@@ -169,10 +192,36 @@ impl PlaybackDevice {
                         }
                     }
 
-                    // Convert i16 to f32 and apply volume
-                    for (i, sample) in data.iter_mut().enumerate() {
-                        let pcm_sample = pcm_buffer[i] as f32 / 32768.0;
-                        *sample = (pcm_sample * volume).clamp(-1.0, 1.0);
+                    if device_channels == config_channels && resampler.is_none() {
+                        // Fast path: no channel mapping or resampling.
+                        for (i, sample) in data.iter_mut().enumerate() {
+                            let pcm_sample = pcm_buffer[i] as f32 / 32768.0;
+                            *sample = (pcm_sample * volume).clamp(-1.0, 1.0);
+                        }
+                    } else {
+                        let mixed: Vec<f32> = pcm_buffer
+                            .iter()
+                            .map(|&sample| sample as f32 / 32768.0)
+                            .collect();
+                        let mapped = map_channels(&mixed, config_channels, device_channels);
+                        let resampled: &[f32] = match resampler.as_mut() {
+                            Some(resampler) => resampler.process(&mapped),
+                            None => &mapped,
+                        };
+                        for (i, sample) in data.iter_mut().enumerate() {
+                            let value = resampled.get(i).copied().unwrap_or(0.0);
+                            *sample = (value * volume).clamp(-1.0, 1.0);
+                        }
+                    }
+
+                    // Keep the most recent speaker output as AEC far-end.
+                    if let Ok(mut ring) = reference.try_lock() {
+                        for &sample in data.iter() {
+                            if ring.len() >= reference_capacity {
+                                ring.pop_front();
+                            }
+                            ring.push_back((sample * 32767.0) as i16);
+                        }
                     }
                 },
                 move |err| {
@@ -213,8 +262,14 @@ impl PlaybackDevice {
 
     /// Snapshot of playback-path counters.
     pub fn stats(&self) -> PlaybackStats {
+        let underruns = self
+            .mixer
+            .try_lock()
+            .map(|mixer| mixer.underruns())
+            .unwrap_or(0);
         PlaybackStats {
             dropped_blocks: self.state.dropped_blocks.load(Ordering::Relaxed),
+            underruns,
         }
     }
 
@@ -344,10 +399,62 @@ impl UserAudioBuffer {
     }
 }
 
+/// Pick the closest supported f32 output format and a resampler when the
+/// device cannot run at the requested rate.
+fn negotiate_output_config(
+    device: &cpal::Device,
+    requested_rate: u32,
+    requested_channels: u16,
+) -> Result<(cpal::StreamConfig, usize, u32, Option<LinearResampler>)> {
+    let ranges = device.supported_output_configs().map_err(|e| {
+        AudioError::DeviceInit(format!("failed to query output formats: {e}"))
+    })?;
+
+    let mut formats = String::new();
+    let mut candidates = Vec::new();
+    for range in ranges {
+        formats.push_str(&format!(
+            " {}ch {}-{}Hz {:?};",
+            range.channels(),
+            range.min_sample_rate().0,
+            range.max_sample_rate().0,
+            range.sample_format()
+        ));
+        if range.sample_format() != cpal::SampleFormat::F32 {
+            continue;
+        }
+        let rate = requested_rate.clamp(range.min_sample_rate().0, range.max_sample_rate().0);
+        let channels = range.channels();
+        let score = (
+            u8::from(channels != requested_channels),
+            rate.abs_diff(requested_rate),
+            channels.abs_diff(requested_channels),
+        );
+        candidates.push((score, range.with_sample_rate(cpal::SampleRate(rate))));
+    }
+
+    let Some(best) = candidates
+        .into_iter()
+        .min_by_key(|(score, _)| *score)
+        .map(|(_, config)| config)
+    else {
+        return Err(AudioError::DeviceInit(format!(
+            "device has no f32 output format; supported:{formats}"
+        )));
+    };
+
+    let device_channels = best.channels() as usize;
+    let device_rate = best.sample_rate().0;
+    let mut stream_config = best.config();
+    stream_config.buffer_size = cpal::BufferSize::Default;
+    let resampler = LinearResampler::new(requested_rate, device_rate);
+
+    Ok((stream_config, device_channels, device_rate, resampler))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn stats_start_at_zero() {
         let device = PlaybackDevice::new(AudioConfig::default()).unwrap();
