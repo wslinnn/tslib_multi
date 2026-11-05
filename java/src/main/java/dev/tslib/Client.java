@@ -70,6 +70,18 @@ public class Client implements AutoCloseable {
     }
 
     /**
+     * Wait up to {@code timeoutMs} for events from the server.
+     *
+     * @param timeoutMs maximum wait in milliseconds
+     * @return array of events (may be empty)
+     * @throws TsLibException on error
+     */
+    public Event[] waitEvents(int timeoutMs) {
+        checkNotClosed();
+        return nativeWaitEvents(nativePtr, timeoutMs);
+    }
+
+    /**
      * Disconnect from the server.
      *
      * @throws TsLibException on error
@@ -95,6 +107,18 @@ public class Client implements AutoCloseable {
     public int getState() {
         checkNotClosed();
         return nativeGetState(nativePtr);
+    }
+
+    /**
+     * Get connection quality metrics.
+     *
+     * @return array of {rttMs, rttDevMs, packetLoss, packetLossIn,
+     *         bytesReceivedPerSec, bytesSentPerSec, lossObservedTotal},
+     *         or {@code null} when not connected
+     */
+    public double[] getNetworkStats() {
+        checkNotClosed();
+        return nativeGetNetworkStats(nativePtr);
     }
 
     /**
@@ -204,6 +228,18 @@ public class Client implements AutoCloseable {
     }
 
     /**
+     * Send a poke to a user.
+     *
+     * @param userId target user ID
+     * @param msg    poke message
+     * @throws TsLibException on error
+     */
+    public void sendPoke(int userId, String msg) {
+        checkNotClosed();
+        nativeSendPoke(nativePtr, userId, msg);
+    }
+
+    /**
      * Move to a different channel.
      *
      * @param channelId target channel ID
@@ -236,6 +272,14 @@ public class Client implements AutoCloseable {
     }
 
     /**
+     * Ask the server to push current server variables (online counts, uptime).
+     */
+    public void updateServerVariables() {
+        checkNotClosed();
+        nativeUpdateServerVariables(nativePtr);
+    }
+
+    /**
      * Notify the server of our input muted state.
      *
      * @param muted true if microphone is muted
@@ -256,6 +300,27 @@ public class Client implements AutoCloseable {
     public void sendAudio(byte[] data, int codec) {
         checkNotClosed();
         nativeSendAudio(nativePtr, data, codec);
+    }
+
+    /**
+     * Set the whisper targets. Empty arrays switch back to channel talk.
+     *
+     * @param clients  target client IDs (max 32)
+     * @param channels target channel IDs (max 255)
+     */
+    public void setWhisperTargets(int[] clients, long[] channels) {
+        checkNotClosed();
+        nativeSetWhisperTargets(nativePtr, clients, channels);
+    }
+
+    /**
+     * Install a low-latency audio sink. Pass {@code null} to remove it.
+     *
+     * @param sink callback invoked for every received voice frame
+     */
+    public void setAudioSink(AudioSink sink) {
+        checkNotClosed();
+        nativeSetAudioSink(nativePtr, sink);
     }
 
     /**
@@ -351,6 +416,7 @@ public class Client implements AutoCloseable {
     private static native void nativeDestroy(long ptr);
     private static native void nativeWaitConnected(long ptr);
     private static native Event[] nativeProcessEvents(long ptr);
+    private static native Event[] nativeWaitEvents(long ptr, int timeoutMs);
     private static native void nativeDisconnect(long ptr);
     private static native boolean nativeIsConnected(long ptr);
     private static native int nativeGetState(long ptr);
@@ -364,10 +430,15 @@ public class Client implements AutoCloseable {
     private static native void nativeSendServerMessage(long ptr, String msg);
     private static native void nativeSendChannelMessage(long ptr, String msg);
     private static native void nativeSendPrivateMessage(long ptr, int userId, String msg);
+    private static native void nativeSendPoke(long ptr, int userId, String msg);
     private static native void nativeMoveToChannel(long ptr, long channelId, String password);
     private static native void nativeSyncState(long ptr);
+    private static native void nativeUpdateServerVariables(long ptr);
+    private static native double[] nativeGetNetworkStats(long ptr);
     private static native void nativeSetInputMuted(long ptr, boolean muted);
     private static native void nativeSendAudio(long ptr, byte[] data, int codec);
+    private static native void nativeSetAudioSink(long ptr, AudioSink sink);
+    private static native void nativeSetWhisperTargets(long ptr, int[] clients, long[] channels);
     private static native void nativeDownloadFile(long ptr, long channelId, String path);
     private static native void nativeUploadFile(long ptr, long channelId, String path, byte[] data, boolean overwrite);
     private static native void nativeListFiles(long ptr, long channelId, String path);

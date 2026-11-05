@@ -85,6 +85,18 @@ public class Identity implements AutoCloseable {
     }
 
     /**
+     * Export the identity as an official TeamSpeak {@code ts.ini}.
+     *
+     * @param label value for the ini {@code id=} field
+     * @return ini content importable by the desktop client
+     * @throws TsLibException on error
+     */
+    public String exportTeamSpeakIni(String label) {
+        checkNotClosed();
+        return nativeExportTeamSpeakIni(nativePtr, label);
+    }
+
+    /**
      * Get the unique identifier (public key hash).
      *
      * @return the UID string
@@ -170,6 +182,7 @@ public class Identity implements AutoCloseable {
     private static native void nativeSave(long ptr, String path);
     private static native long nativeFromString(String data);
     private static native String nativeExportString(long ptr);
+    private static native String nativeExportTeamSpeakIni(long ptr, String label);
     private static native String nativeGetUniqueId(long ptr);
     private static native int nativeGetSecurityLevel(long ptr);
     private static native String nativeGetNickname(long ptr);

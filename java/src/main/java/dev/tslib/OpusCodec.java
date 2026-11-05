@@ -63,6 +63,50 @@ public class OpusCodec implements AutoCloseable {
     }
 
     /**
+     * Conceal a lost packet using Opus PLC.
+     *
+     * @return PLC samples as 16-bit little-endian bytes
+     * @throws TsLibException on decoding error
+     */
+    public byte[] decodePlc() {
+        checkNotClosed();
+        return nativeDecodePlc(nativePtr);
+    }
+
+    /**
+     * Change the encoder bitrate at runtime.
+     *
+     * @param bitrate bits per second
+     * @throws TsLibException on error
+     */
+    public void setBitrate(int bitrate) {
+        checkNotClosed();
+        nativeSetBitrate(nativePtr, bitrate);
+    }
+
+    /**
+     * Toggle inband forward error correction.
+     *
+     * @param enabled true to enable FEC
+     * @throws TsLibException on error
+     */
+    public void setFec(boolean enabled) {
+        checkNotClosed();
+        nativeSetFec(nativePtr, enabled);
+    }
+
+    /**
+     * Set the packet loss percentage the encoder should optimize FEC for.
+     *
+     * @param percent expected loss percentage
+     * @throws TsLibException on error
+     */
+    public void setExpectedPacketLoss(int percent) {
+        checkNotClosed();
+        nativeSetExpectedPacketLoss(nativePtr, percent);
+    }
+
+    /**
      * Get the audio configuration used by this codec.
      */
     public AudioConfig getConfig() {
@@ -90,5 +134,9 @@ public class OpusCodec implements AutoCloseable {
     private static native void nativeDestroy(long ptr);
     private static native byte[] nativeEncode(long ptr, byte[] pcm);
     private static native byte[] nativeDecode(long ptr, byte[] data);
+    private static native byte[] nativeDecodePlc(long ptr);
+    private static native void nativeSetBitrate(long ptr, int bitrate);
+    private static native void nativeSetFec(long ptr, boolean enabled);
+    private static native void nativeSetExpectedPacketLoss(long ptr, int percent);
     private static native AudioConfig nativeGetConfig(long ptr);
 }
