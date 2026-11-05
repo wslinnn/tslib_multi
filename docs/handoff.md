@@ -1,7 +1,7 @@
 # 交接 / 当前进度（Handoff）
 
 > 最后更新：2026-11-05  
-> 当前 HEAD：`680402c fix(channel): 删除子树并防止频道树成环`  
+> 当前 HEAD：`8483907 feat(audio): AudioReceived 事件携带语音包序号`  
 > 工作区：干净  
 > 持久规范：`AGENTS.md`；需求：`docs/spec-error-fixes-performance.md`；API 差异：`docs/api-changes/v0.2.0.md`
 
@@ -48,10 +48,13 @@
 | `9fa75bf` | FR-ST-02/05 `MaxClientsKind`、`Inherited` 解析、按人数排除满员频道 |
 | `d16b46e` | FR-ST-03 收尾：`PermissionHints.known`、Java/Python 绑定 |
 | `680402c` | FR-ST-04 删除子树、reparent 环检测、路径/打印防环 |
+| `033078b` | PR-13 采集/播放/解码/PLC 可观测计数 |
+| `1cf4054` | PR-04（增量）`users_snapshot`/`channels_snapshot` 共享快照 |
+| `8483907` | `AudioReceived` 暴露 `seq`，供下游检测丢帧/PLC |
 
 ### 验证
 
-- `tslib-core` 79 passed；`tslib-bot` 30；`tslib-audio` 33；`tslib-channel` 47；`tslib-chat` 116。
+- `tslib-core` 80 passed；`tslib-bot` 30；`tslib-audio` 37；`tslib-channel` 47；`tslib-chat` 116。
 - 合并测试用 `-j 1` 通过（默认并行偶发 rustc 崩溃）。
 - `cargo check -p tslib-ffi -p tslib-python -p test-suite` 通过。
 - Host JNI：`cargo check/build -p tslib-jni` 通过；`dumpbin` 确认符号。
@@ -75,6 +78,8 @@
 | 频道容量 | `MaxClientsKind` 区分 Unlimited/Inherited/Limited/Unknown；`Inherited` 沿父链解析 |
 | 权限未知 | 查询失败 `known=false`、`bits=0`，不再回退 `JOIN` |
 | 频道删除 | `remove_channel` 删除整棵子树，与服务器一致 |
+| 用户/频道读取 | 新增共享 `Arc` 快照；旧 `users()`/`channels()` 保留 `Vec` 返回 |
+| 音频事件 | `AudioReceived` 携带 `seq`，jitter/PLC 由上层或后续 AudioManager 接入实现 |
 | `max_memory_download` | 默认 **64 MiB**；超出报 `FileTransferFailed`，不截断 |
 | 初始静音 | 默认 **true**（隐私安全），暂未做成 `ClientConfig` 字段 |
 | 组 whisper | 本轮不做 |
@@ -87,8 +92,8 @@
 
 ### P1（低风险、建议下一批）
 
-1. **PR-13 可观测性**：采集丢帧、PLC、mixer 争用、事件丢弃计数与查询接口。
-2. **PR-04**：`users()`/`channels()` 快照化（`Arc<[...]>` 或迭代器），先定 API 方案。
+1. **PR-04 后续**：JNI/Python 读取改用快照；若要让 `users()`/`channels()` 本身零拷贝，需改返回类型（待拍板）。
+2. **FR-AU-03/04**：事件已有 `seq`；下一步给 `AudioManager` 增加带 `seq` 的入口与定时 release pump，实现固定 60 ms jitter + PLC。
 3. **PR-06/07**：事件总线满载时控制事件不丢；慢 handler 不阻塞事件泵（需 actor 设计）。
 4. **PR-11**：解码器分片锁/复用缓冲（仅多线程调用 `process_incoming` 时有收益）。
 

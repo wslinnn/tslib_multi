@@ -105,16 +105,16 @@ arm64 与 x86_64 均已通过。
 - 变更摘要：`CHANGELOG.md`
 - 当前进度/剩余 backlog：`docs/handoff.md`
 
-**已完成**：B1 全部；B2 大部分（Connected 单次、配置接线、非 Opus codec、Bot 事件泵、并发查询、移动状态、重连恢复、FFI 事件泵、Java 缺失 native/EchoCanceller、User/ServerInfo 字段、kick/ban/ChannelJoined、权限提示、is_talking、热路径日志）；B4 低风险项（解码器清理、说话超时 O(log n)、采集/播放/混音缓冲复用、音频事件 `Arc` 负载、音频回调 `try_lock`）；FR-SC-02 脱敏；FR-FS-06 上传落盘校验；Python 历史写入/实时 server info/事件负载；FR-BD-05 JNI JSON/日志；FR-ST-02/03/04/05（`MaxClientsKind`、`PermissionHints.known`、删子树/环检测、满员过滤）。
+**已完成**：B1 全部；B2 大部分（Connected 单次、配置接线、非 Opus codec、Bot 事件泵、并发查询、移动状态、重连恢复、FFI 事件泵、Java 缺失 native/EchoCanceller、User/ServerInfo 字段、kick/ban/ChannelJoined、权限提示、is_talking、热路径日志）；B4 低风险项（解码器清理、说话超时 O(log n)、采集/播放/混音缓冲复用、音频事件 `Arc` 负载、音频回调 `try_lock`、音频计数、共享用户/频道快照）；FR-SC-02 脱敏；FR-FS-06 上传落盘校验；Python 历史写入/实时 server info/事件负载；FR-BD-05 JNI JSON/日志；FR-ST-02/03/04/05（`MaxClientsKind`、`PermissionHints.known`、删子树/环检测、满员过滤）；`AudioReceived.seq`。
 
 **未做/暂缓**：
 
 1. 命令结果等待（actor，暂缓）
 2. 文件流式/续传、`ftstop/ftlist`
-3. 音频 jitter/PLC/重采样/AEC 集成/设备格式
-4. 性能 PR-01/04/06/07/11~16（PR-02/03/08/09/10 已完成）
+3. 音频 jitter/PLC/重采样/AEC 集成/设备格式（`seq` 已暴露）
+4. 性能 PR-01/06/07/11/12/14/16（PR-02/03/04 增量/08/09/10/13 已完成）
 5. Python 长期专用线程/GIL 方案
 6. ServerQuery/Streams/命令层/头像图标/完整 view 等 P2
 7. 真实服务器/真机、性能基线、CI semver 门禁、Java 测试
 
-**下一批建议**：PR-13 可观测性计数、PR-04 快照 API 设计、PR-06/07 事件总线、PR-11 解码器分片。
+**下一批建议**：AudioManager 带 seq 的 jitter/PLC 接入、绑定层使用快照、PR-06/07 事件总线、PR-11 解码器分片。
