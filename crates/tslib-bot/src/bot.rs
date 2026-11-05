@@ -5,6 +5,7 @@ use crate::config::BotConfig;
 use crate::error::{BotError, Result};
 use crate::plugin::{Plugin, PluginManager};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
@@ -56,12 +57,20 @@ impl Bot {
 
     /// Connect to the server
     pub async fn connect(&mut self) -> Result<()> {
-        let core_config = ClientConfig::builder()
+        let mut builder = ClientConfig::builder()
             .address(&self.config.address)
             .identity(self.config.identity.clone())
-            .nickname(&self.config.nickname)
-            .build()
-            .map_err(|e| BotError::Core(e))?;
+            .nickname(&self.config.nickname);
+        if let Some(password) = &self.config.password {
+            builder = builder.password(password.clone());
+        }
+        if let Some(channel) = &self.config.channel {
+            builder = builder.channel(channel.clone());
+        }
+        if let Some(channel_password) = &self.config.channel_password {
+            builder = builder.channel_password(channel_password.clone());
+        }
+        let core_config = builder.build().map_err(BotError::Core)?;
 
         let client = Client::connect(core_config)?;
         self.client = Some(client);
@@ -129,16 +138,93 @@ impl Bot {
             client.wait_connected().await.map_err(BotError::Core)?;
         }
 
-        let mut events = self.client.as_ref().unwrap().subscribe();
+        // Notify plugins that the connection is ready.
+        {
+            let plugins = self.plugins.clone();
+            plugins.read().await.notify_connect(self).await?;
+        }
+
         let commands = self.commands.clone();
         let config = self.config.clone();
 
         // Channel for command replies back to the main loop
         let (reply_tx, mut reply_rx) = mpsc::channel::<ReplyMessage>(64);
 
+        // Ctrl+C must not cancel `wait_events` mid-poll, otherwise a collected
+        // stream item can be dropped. A tiny flag task avoids that.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_signal = shutdown.clone();
+        let ctrl_c = tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            shutdown_signal.store(true, Ordering::SeqCst);
+        });
+
         info!("Bot is running. Press Ctrl+C to stop.");
 
-        while *self.running.read().await {
+        while *self.running.read().await && !shutdown.load(Ordering::SeqCst) {
+            // Drive the connection event stream. Without this call no server
+            // event is ever produced, so the bot would never see messages.
+            let events = match self.client.as_mut() {
+                Some(client) => match client.wait_events(50).await {
+                    Ok(events) => events,
+                    Err(e) => {
+                        error!("Event pump failed: {}", e);
+                        break;
+                    }
+                },
+                None => break,
+            };
+
+            for event in events {
+                match event {
+                    Event::TextMessage {
+                        sender_id,
+                        sender_name,
+                        message,
+                        target,
+                    } => {
+                        let is_private =
+                            matches!(target, tslib_core::events::MessageTarget::Private);
+                        let sender_uid = self
+                            .client
+                            .as_ref()
+                            .and_then(|client| client.user(sender_id))
+                            .map(|user| user.uid)
+                            .filter(|uid| !uid.is_empty());
+                        Self::handle_message(
+                            &commands,
+                            &config,
+                            reply_tx.clone(),
+                            sender_id,
+                            sender_name,
+                            sender_uid,
+                            message,
+                            is_private,
+                        )
+                        .await;
+                    }
+                    Event::Disconnected { reason } => {
+                        warn!("Disconnected: {}", reason);
+                        if config.auto_reconnect {
+                            info!("Reconnecting in {:?}...", config.reconnect_delay);
+                            tokio::time::sleep(config.reconnect_delay).await;
+                            if let Err(e) = self.reconnect().await {
+                                error!("Reconnection failed: {}", e);
+                                break;
+                            }
+                            let plugins = self.plugins.clone();
+                            if let Err(e) = plugins.read().await.notify_connect(self).await {
+                                error!("Plugin on_connect failed after reconnect: {}", e);
+                            }
+                            info!("Reconnected successfully");
+                        } else {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             // Process pending replies from command handlers
             while let Ok(reply) = reply_rx.try_recv() {
                 if let Some(client) = self.client.as_mut() {
@@ -152,50 +238,18 @@ impl Bot {
                     }
                 }
             }
+        }
 
-            tokio::select! {
-                event = events.recv() => {
-                    match event {
-                        Ok(Event::TextMessage { sender_id, sender_name, message, target }) => {
-                            let is_private = matches!(target, tslib_core::events::MessageTarget::Private);
-                            Self::handle_message(
-                                &commands,
-                                &config,
-                                reply_tx.clone(),
-                                sender_id,
-                                sender_name,
-                                None,
-                                message,
-                                is_private,
-                            ).await;
-                        }
-                        Ok(Event::Disconnected { reason }) => {
-                            warn!("Disconnected: {}", reason);
-                            if config.auto_reconnect {
-                                info!("Reconnecting in {:?}...", config.reconnect_delay);
-                                tokio::time::sleep(config.reconnect_delay).await;
-                                drop(events);
-                                if let Err(e) = self.reconnect().await {
-                                    error!("Reconnection failed: {}", e);
-                                    break;
-                                }
-                                events = self.client.as_ref().unwrap().subscribe();
-                                info!("Reconnected successfully");
-                            } else {
-                                break;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            debug!("Event error: {}", e);
-                        }
-                    }
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Shutting down...");
-                    break;
-                }
-            }
+        ctrl_c.abort();
+
+        let plugins = self.plugins.clone();
+        if let Err(e) = plugins
+            .read()
+            .await
+            .notify_disconnect(self, "Bot stopped")
+            .await
+        {
+            warn!("Plugin on_disconnect failed: {}", e);
         }
 
         self.disconnect().await?;

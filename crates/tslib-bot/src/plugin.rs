@@ -77,6 +77,12 @@ impl PluginManager {
 
         plugin.on_load(bot).await?;
 
+        // Register the commands the plugin declares. `on_load` may also have
+        // registered some directly; duplicates are resolved by the registry.
+        for command in plugin.commands() {
+            bot.register_command(command).await;
+        }
+
         self.plugins.insert(name, Arc::new(RwLock::new(plugin)));
         Ok(())
     }
