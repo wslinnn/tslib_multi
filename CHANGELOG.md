@@ -41,6 +41,11 @@
 - `User.created_at` / `last_connected_at`（unix 秒，服务器提供时）。
 - `Event::ConnectionStalled`：临时断线超过 watchdog 时发一次，不改变重连状态。
 - `ChannelManager::joinable_channels` 标记 `#[deprecated]`，推荐按人数过滤的新方法。
+- `ActorHandle` / `ActorEventStream`：客户端在专用线程运行，命令带超时返回结果，事件按消费者分发；控制事件不丢，语音事件 drop-oldest 并计数。
+- `Event::Notification { command }`：未专门映射的协议消息不再静默丢弃。
+- FFI 新增 `tslib_actor_*`（连接、pump、命令结果、状态、语音丢弃计数）。
+- Java 新增 `ActorClient`（命令结果 + `pumpEvents`），旧 `Client` 保持兼容。
+- Python `Client` 改为 actor 后端：构造函数完成连接，`process_events` 非阻塞，新增 `wait_events`。
 
 ### Changed
 

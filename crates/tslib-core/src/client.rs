@@ -1665,9 +1665,12 @@ impl Client {
                 }
                 events
             }
-            _ => {
-                log::debug!("Unhandled MessageEvent: {:?}", msg.get_command_name());
-                Vec::new()
+            other => {
+                let command = other.get_command_name().to_string();
+                debug!("Unhandled MessageEvent: {}", command);
+                let event = Event::Notification { command };
+                let _ = self.event_tx.send(event.clone());
+                vec![event]
             }
         }
     }

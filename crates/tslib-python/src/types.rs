@@ -378,6 +378,10 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             }
             let _ = dict.set_item("files", entries);
         }
+        Event::Notification { command } => {
+            let _ = dict.set_item("type", "notification");
+            let _ = dict.set_item("command", command);
+        }
         Event::ConnectionStalled { silent_for_ms } => {
             let _ = dict.set_item("type", "connection_stalled");
             let _ = dict.set_item("silent_for_ms", silent_for_ms);

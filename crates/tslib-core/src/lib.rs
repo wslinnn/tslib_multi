@@ -33,6 +33,7 @@
 //! }
 //! ```
 
+pub mod actor;
 pub mod client;
 pub mod config;
 pub mod connection;
@@ -42,6 +43,7 @@ pub mod identity;
 pub mod state;
 
 // Re-exports
+pub use actor::{ActorEventStream, ActorHandle};
 pub use client::{Client, FileEntry, NetworkStats};
 pub use config::{ClientConfig, FileTransferConfig};
 pub use connection::{Connection, ConnectionState};

@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod actor;
 mod audio;
 mod bbcode;
 mod client;

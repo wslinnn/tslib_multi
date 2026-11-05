@@ -32,6 +32,11 @@ public class Identity implements AutoCloseable {
         this.nativePtr = ptr;
     }
 
+    /** Native pointer for package-internal bindings (ActorClient). */
+    long nativePtr() {
+        return nativePtr;
+    }
+
     /**
      * Load an identity from a file.
      *

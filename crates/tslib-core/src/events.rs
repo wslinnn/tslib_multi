@@ -98,6 +98,14 @@ pub enum Event {
         /// How long the client has been waiting for the reconnect.
         silent_for_ms: u64,
     },
+    /// A protocol message without a dedicated high-level event.
+    ///
+    /// Emitted as a fallback so unknown/new server messages stay observable
+    /// instead of being silently dropped.
+    Notification {
+        /// Protocol command name (for example `notifyclientchatcomposing`).
+        command: String,
+    },
     /// We were poked by someone
     Poked {
         poker_id: u16,

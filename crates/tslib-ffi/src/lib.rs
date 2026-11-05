@@ -19,7 +19,9 @@
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 
-use tslib_core::{Client, ClientConfig, Event, Identity};
+use tslib_core::{Client, ClientConfig, ConnectionState, Event, Identity};
+
+mod actor;
 
 /// Error codes
 #[repr(C)]
@@ -40,6 +42,22 @@ pub enum TsLibError {
 #[repr(C)]
 pub struct TsLibClient {
     _private: [u8; 0],
+}
+
+/// Opaque handle to an actor-backed client
+#[repr(C)]
+pub struct TsLibActor {
+    _private: [u8; 0],
+}
+
+pub(crate) fn map_connection_state(state: ConnectionState) -> TsLibConnectionState {
+    match state {
+        ConnectionState::Disconnected => TsLibConnectionState::Disconnected,
+        ConnectionState::Connecting => TsLibConnectionState::Connecting,
+        ConnectionState::Connected => TsLibConnectionState::Connected,
+        ConnectionState::Initializing => TsLibConnectionState::Connecting,
+        ConnectionState::Reconnecting => TsLibConnectionState::Reconnecting,
+    }
 }
 
 /// Opaque handle to an identity

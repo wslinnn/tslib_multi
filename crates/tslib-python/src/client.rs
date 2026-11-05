@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::time::Duration;
 
 use crate::error::to_py_err;
 use crate::identity::PyIdentity;
@@ -7,18 +8,22 @@ use crate::types::{connection_state_to_u8, event_to_dict, PyChannel, PyServerInf
 
 /// A TeamSpeak 3 client connection.
 ///
-/// The client is not thread-safe (unsendable) because the underlying
-/// tsclientlib connection is not Send/Sync.
+/// The client runs on a dedicated native thread (actor) so Python handlers and
+/// other Python threads are not blocked by the protocol event pump. Methods
+/// that send commands wait for the actor to hand the command off, with a
+/// bounded timeout.
 ///
 /// Example::
 ///
 ///     client = tslib.Client("localhost:9987", identity, "MyBot")
-///     client.wait_connected()
 ///     client.send_server_message("Hello!")
+///     for event in client.process_events():
+///         ...
 ///     client.disconnect()
 #[pyclass(name = "Client", unsendable)]
 pub struct PyClient {
-    inner: tslib_core::Client,
+    actor: tslib_core::ActorHandle,
+    events: tslib_core::ActorEventStream,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -32,6 +37,9 @@ impl PyClient {
     ///     nickname: Display name on the server.
     ///     password: Server password (optional).
     ///     channel: Default channel to join (optional).
+    ///
+    /// The constructor blocks until the initial connection and state
+    /// synchronization complete (bounded by ``connect_timeout``).
     #[new]
     #[pyo3(signature = (address, identity, nickname, password=None, channel=None))]
     fn new(
@@ -57,47 +65,66 @@ impl PyClient {
         }
 
         let config = builder.build().map_err(to_py_err)?;
+        let actor = tslib_core::ActorHandle::spawn(config).map_err(to_py_err)?;
+        let events = actor.subscribe();
 
-        let inner = runtime.block_on(async {
-            tslib_core::Client::connect(config)
-        }).map_err(to_py_err)?;
-
-        Ok(Self { inner, runtime })
+        Ok(Self {
+            actor,
+            events,
+            runtime,
+        })
     }
 
-    /// Wait for the connection to be fully established.
-    ///
-    /// This blocks until the initial state synchronization is complete.
-    /// It holds the GIL while blocking; see the module docstring.
+    /// Connection is established in the constructor; this is kept for
+    /// compatibility and returns immediately.
     fn wait_connected(&mut self) -> PyResult<()> {
-        self.runtime
-            .block_on(self.inner.wait_connected())
-            .map_err(to_py_err)
+        Ok(())
     }
 
-    /// Process pending events from the server.
+    /// Drain pending events without blocking.
     ///
-    /// Returns a list of event dicts. Call this regularly to stay in sync.
-    /// This blocks the calling thread and holds the GIL while it waits for
-    /// the connection stream.
+    /// Returns a list of event dicts. The actor thread keeps pumping in the
+    /// background, so this never blocks on the network.
     fn process_events<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let events = self
-            .runtime
-            .block_on(self.inner.process_events())
-            .map_err(to_py_err)?;
-
-        Ok(events.iter().map(|e| event_to_dict(py, e)).collect())
+        let mut events = Vec::new();
+        while let Some(event) = self.events.try_recv() {
+            events.push(event_to_dict(py, &event));
+        }
+        Ok(events)
     }
 
-    /// Disconnect from the server.
+    /// Wait up to ``timeout_ms`` for events, then drain the queue.
+    #[pyo3(signature = (timeout_ms=100))]
+    fn wait_events<'py>(
+        &mut self,
+        py: Python<'py>,
+        timeout_ms: u64,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let first = self
+            .runtime
+            .block_on(self.events.recv_timeout(Duration::from_millis(timeout_ms)));
+        let mut events = Vec::new();
+        if let Some(event) = first {
+            events.push(event_to_dict(py, &event));
+        }
+        while let Some(event) = self.events.try_recv() {
+            events.push(event_to_dict(py, &event));
+        }
+        Ok(events)
+    }
+
+    /// Disconnect from the server and stop the actor thread.
     fn disconnect(&mut self) -> PyResult<()> {
-        self.inner.disconnect().map_err(to_py_err)
+        let actor = self.actor.clone();
+        self.runtime
+            .block_on(actor.shutdown())
+            .map_err(to_py_err)
     }
 
     /// Whether the client is currently connected.
     #[getter]
     fn is_connected(&self) -> bool {
-        self.inner.is_connected()
+        self.actor.state().is_connected()
     }
 
     /// The current connection state as an integer.
@@ -105,83 +132,114 @@ impl PyClient {
     /// Compare with ``ConnectionState`` constants.
     #[getter]
     fn state(&self) -> u8 {
-        connection_state_to_u8(self.inner.state())
+        connection_state_to_u8(self.actor.state())
     }
 
     /// Our client ID on the server, or None if not yet assigned.
     #[getter]
-    fn client_id(&self) -> Option<u16> {
-        self.inner.client_id()
+    fn client_id(&self) -> PyResult<Option<u16>> {
+        self.runtime
+            .block_on(self.actor.client_id())
+            .map_err(to_py_err)
     }
 
     /// Our current channel ID, or None.
     #[getter]
-    fn channel_id(&self) -> Option<u64> {
-        self.inner.channel_id()
+    fn channel_id(&self) -> PyResult<Option<u64>> {
+        self.runtime
+            .block_on(self.actor.channel_id())
+            .map_err(to_py_err)
     }
 
     /// Get all channels on the server.
-    fn channels(&mut self) -> Vec<PyChannel> {
-        self.inner
-            .channels()
-            .iter()
-            .cloned()
-            .map(PyChannel::from)
-            .collect()
+    fn channels(&mut self) -> PyResult<Vec<PyChannel>> {
+        let channels = self
+            .runtime
+            .block_on(self.actor.channels())
+            .map_err(to_py_err)?;
+        Ok(channels.iter().cloned().map(PyChannel::from).collect())
     }
 
     /// Get all connected users.
-    fn users(&mut self) -> Vec<PyUser> {
-        self.inner
-            .users()
-            .iter()
-            .cloned()
-            .map(PyUser::from)
-            .collect()
+    fn users(&mut self) -> PyResult<Vec<PyUser>> {
+        let users = self
+            .runtime
+            .block_on(self.actor.users())
+            .map_err(to_py_err)?;
+        Ok(users.iter().cloned().map(PyUser::from).collect())
     }
 
     /// Get a specific channel by ID.
-    fn channel(&self, id: u64) -> Option<PyChannel> {
-        self.inner.channel(id).map(PyChannel::from)
+    fn channel(&mut self, id: u64) -> PyResult<Option<PyChannel>> {
+        let channel = self
+            .runtime
+            .block_on(
+                self.actor
+                    .execute(Duration::from_secs(5), move |client| Ok(client.channel(id))),
+            )
+            .map_err(to_py_err)?;
+        Ok(channel.map(PyChannel::from))
     }
 
     /// Get a specific user by ID.
-    fn user(&self, id: u16) -> Option<PyUser> {
-        self.inner.user(id).map(PyUser::from)
+    fn user(&mut self, id: u16) -> PyResult<Option<PyUser>> {
+        let user = self
+            .runtime
+            .block_on(
+                self.actor
+                    .execute(Duration::from_secs(5), move |client| Ok(client.user(id))),
+            )
+            .map_err(to_py_err)?;
+        Ok(user.map(PyUser::from))
     }
 
     /// Get live server information.
-    ///
-    /// Reads the current bookkeeping state (online clients/channels, uptime)
-    /// instead of returning a cached snapshot from the last sync.
-    fn server_info(&self) -> PyServerInfo {
-        PyServerInfo::from(self.inner.server_info())
+    fn server_info(&self) -> PyResult<PyServerInfo> {
+        let info = self
+            .runtime
+            .block_on(
+                self.actor
+                    .execute(Duration::from_secs(5), |client| Ok(client.server_info())),
+            )
+            .map_err(to_py_err)?;
+        Ok(PyServerInfo::from(info))
     }
 
     /// Send a message to the entire server.
     fn send_server_message(&mut self, msg: String) -> PyResult<()> {
-        self.inner.send_server_message(msg).map_err(to_py_err)
+        self.runtime
+            .block_on(self.actor.send_server_message(msg))
+            .map_err(to_py_err)
     }
 
     /// Send a message to the current channel.
     fn send_channel_message(&mut self, msg: String) -> PyResult<()> {
-        self.inner.send_channel_message(msg).map_err(to_py_err)
+        self.runtime
+            .block_on(self.actor.send_channel_message(msg))
+            .map_err(to_py_err)
     }
 
     /// Send a private message to a user.
     fn send_private_message(&mut self, user_id: u16, msg: String) -> PyResult<()> {
-        self.inner
-            .send_private_message(user_id, msg)
+        self.runtime
+            .block_on(self.actor.send_private_message(user_id, msg))
             .map_err(to_py_err)
     }
 
     /// Move to a different channel.
     fn move_to_channel(&mut self, channel_id: u64) -> PyResult<()> {
-        self.inner.move_to_channel(channel_id).map_err(to_py_err)
+        self.runtime
+            .block_on(self.actor.move_to_channel(channel_id))
+            .map_err(to_py_err)
     }
 
     /// Re-synchronize the local state from the server.
     fn sync_state(&mut self) -> PyResult<()> {
-        self.inner.sync_state().map_err(to_py_err)
+        self.runtime
+            .block_on(
+                self.actor
+                    .execute(Duration::from_secs(10), |client| client.sync_state()),
+            )
+            .map_err(to_py_err)
     }
 }

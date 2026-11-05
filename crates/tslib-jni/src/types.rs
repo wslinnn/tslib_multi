@@ -415,6 +415,10 @@ pub fn create_java_event<'a>(
             put_string(env, &map, "message", message);
             "command_error"
         }
+        Event::Notification { command } => {
+            put_string(env, &map, "command", command);
+            "notification"
+        }
         Event::ConnectionStalled { silent_for_ms } => {
             put_long(env, &map, "silent_for_ms", *silent_for_ms as i64);
             "connection_stalled"
