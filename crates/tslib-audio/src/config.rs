@@ -1,6 +1,7 @@
 //! Audio configuration
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Audio configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +38,9 @@ pub struct AudioConfig {
     pub output_volume: f32,
     /// Playback buffer size in milliseconds
     pub playback_buffer_ms: u32,
+    /// Per-user decoder cache limits
+    #[serde(default)]
+    pub decoder_pool: DecoderPoolConfig,
 }
 
 impl Default for AudioConfig {
@@ -58,6 +62,7 @@ impl Default for AudioConfig {
             input_volume: 1.0,
             output_volume: 1.0,
             playback_buffer_ms: 60,
+            decoder_pool: DecoderPoolConfig::default(),
         }
     }
 }
@@ -92,6 +97,65 @@ impl AudioConfig {
     /// Get the playback buffer size in samples
     pub fn playback_buffer_samples(&self) -> usize {
         (self.sample_rate * self.playback_buffer_ms / 1000) as usize
+    }
+}
+
+/// Per-user decoder cache configuration.
+///
+/// Every remote speaker needs a separate Opus decoder. A long-running session
+/// on a busy server must both release decoders for users that left and bound
+/// the cache for users that went quiet, otherwise memory grows for the whole
+/// session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecoderPoolConfig {
+    /// Release a decoder after this long without audio.
+    ///
+    /// `None` keeps quiet users until they leave or `max_decoders` forces an
+    /// eviction. Defaults to 5 minutes. Serialized as milliseconds.
+    #[serde(with = "duration_ms", default = "duration_ms::default_timeout")]
+    pub idle_timeout: Option<Duration>,
+    /// Maximum number of cached decoders; the least recently used one is
+    /// evicted first. Defaults to 512; values below 1 are treated as 1.
+    #[serde(default = "default_max_decoders")]
+    pub max_decoders: usize,
+}
+
+impl Default for DecoderPoolConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout: duration_ms::default_timeout(),
+            max_decoders: default_max_decoders(),
+        }
+    }
+}
+
+fn default_max_decoders() -> usize {
+    512
+}
+
+/// Serialize `Option<Duration>` as optional milliseconds, which is friendlier
+/// in JSON config files than serde's default `{secs, nanos}` struct.
+mod duration_ms {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
+
+    pub fn default_timeout() -> Option<Duration> {
+        Some(Duration::from_secs(5 * 60))
+    }
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<Duration>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .map(|duration| duration.as_millis() as u64)
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Duration>, D::Error> {
+        Option::<u64>::deserialize(deserializer).map(|millis| millis.map(Duration::from_millis))
     }
 }
 
@@ -177,6 +241,16 @@ mod tests {
         let cfg = AudioConfig::default();
         // 48000 * 60 / 1000 = 2880
         assert_eq!(cfg.playback_buffer_samples(), 2880);
+    }
+
+    #[test]
+    fn decoder_pool_defaults() {
+        let cfg = AudioConfig::default();
+        assert_eq!(
+            cfg.decoder_pool.idle_timeout,
+            Some(Duration::from_secs(5 * 60))
+        );
+        assert_eq!(cfg.decoder_pool.max_decoders, 512);
     }
 
     #[test]

@@ -18,6 +18,9 @@
 - Java `Client` 新增 `waitEvents/sendPoke/getNetworkStats/updateServerVariables/setWhisperTargets/setAudioSink` 与 `AudioSink` 接口。
 - Java `Identity` 新增 `exportTeamSpeakIni`；`OpusCodec` 新增 `decodePlc/setBitrate/setFec/setExpectedPacketLoss`。
 - 新增 Java `EchoCanceller`（AEC3）。
+- `DecoderPoolConfig`（默认 5 分钟空闲淘汰、最多 512 个解码器）及 `AudioConfig.decoder_pool`。
+- `AudioManager::handle_event` / `handle_events`，把 `UserLeft` 映射为解码器与混音缓冲清理。
+- `AudioManager::evict_idle_decoders`、`AudioManager::decoder_count`，用于主动回收与诊断。
 
 ### Changed
 
@@ -32,6 +35,7 @@
 - `Connected` 只在状态同步后发送一次，不再重复。
 - Bot 每轮驱动 `wait_events`；owner-only 使用发送者 UID；插件命令在加载时注册；`BotConfig` 的密码/频道参数传入客户端。
 - `AudioManager` 仅对 Opus Voice/Music（4/5）解码，其他 codec 返回 `UnsupportedCodec`。
+- `AudioManager` 按用户维护解码器时间戳：空闲超时自动淘汰，数量超限淘汰最久未用；`process_incoming` 创建解码器失败返回错误而不是 panic。
 - 文件列表/权限查询按 `return_code` 关联，支持并发；同一频道/路径重复请求返回 `InvalidArgument`。
 - `move_to_channel` 不再发送后立即写 `channel_id`，只在服务器确认后更新。
 - 重连后重订阅频道、同步状态、恢复静音，并清空失效的 whisper 目标。
@@ -56,6 +60,7 @@
 - FFI 没有 runtime/事件泵，连接无法被驱动。
 - 文件列表/权限查询并发时互相覆盖。
 - 重连后订阅、静音和本地状态丢失。
+- 长时间多用户会话中，已离开或长期静默用户的 Opus 解码器常驻内存。
 
 ### Security
 

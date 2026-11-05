@@ -38,7 +38,7 @@ pub mod playback;
 
 // Re-exports
 pub use codec::{Decoder, Encoder, OpusCodec};
-pub use config::AudioConfig;
+pub use config::{AudioConfig, DecoderPoolConfig};
 pub use echo::{EchoEngine, SpeexEchoEngine};
 pub use error::{AudioError, Result};
 pub use manager::AudioManager;
