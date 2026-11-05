@@ -61,6 +61,8 @@
 - CI 新增 `cargo-semver-checks` API 兼容性检查（`.github/workflows/api.yml`）。
 - 类型化 ID（`ClientId`/`ChannelId`/`DatabaseId`/`ServerGroupId`/`ChannelGroupId`/`PermissionId`/`IconId`）。
 - 管理命令封装：踢人/封禁/建删频道/编辑频道/组成员/频道与客户端权限。
+- `FieldUpdate` 与 `send_field_updates`，用于类型化 raw 字段更新。
+- `Client::crc32`/`icon_id_for` 图标 id 推导。
 - `Client::send_raw_command`、`send_audio_to_group`（TS6 NEWPROTOCOL 组 whisper）。
 - `ServerView` + `view()`/`view_revision()` 与 `ViewReady`/`ViewChanged` 事件。
 - `ClientDiagnostics`/`diagnostics()`。

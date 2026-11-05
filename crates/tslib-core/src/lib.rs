@@ -47,7 +47,7 @@ pub mod state;
 // Re-exports
 pub use actor::{ActorEventStream, ActorHandle};
 pub use client::{
-    Client, ClientDiagnostics, FileEntry, NetworkStats, PumpStats, ServerView,
+    Client, ClientDiagnostics, FieldUpdate, FileEntry, NetworkStats, PumpStats, ServerView,
 };
 pub use config::{ClientConfig, FileTransferConfig};
 pub use connection::{Connection, ConnectionState};

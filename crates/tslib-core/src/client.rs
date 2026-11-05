@@ -64,6 +64,22 @@ pub struct NetworkStats {    /// Smoothed round trip time in milliseconds.
     pub loss_observed_total: u64,
 }
 
+/// A single field/value pair for raw command updates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldUpdate {
+    pub field: String,
+    pub value: String,
+}
+
+impl FieldUpdate {
+    pub fn new(field: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            value: value.into(),
+        }
+    }
+}
+
 /// Timing counters for the event pump (PR-01 baseline).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PumpStats {
@@ -2454,6 +2470,19 @@ impl Client {
         Ok(())
     }
 
+    /// Send a raw command with typed field updates.
+    pub fn send_field_updates(
+        &mut self,
+        command: &str,
+        fields: &[FieldUpdate],
+    ) -> Result<()> {
+        let args: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|field| (field.field.as_str(), field.value.as_str()))
+            .collect();
+        self.send_raw_command(command, &args)
+    }
+
     /// Kick a client from the channel or server (`clientkick`).
     pub fn kick_client(
         &mut self,
@@ -2980,6 +3009,24 @@ impl Client {
     /// Server path for an icon id (`/icon_<crc32>`).
     pub fn icon_path(icon_id: i64) -> String {
         format!("/icon_{icon_id}")
+    }
+
+    /// CRC32 (IEEE) used as the icon id.
+    pub fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    /// Icon id derived from the file bytes.
+    pub fn icon_id_for(data: &[u8]) -> i64 {
+        Self::crc32(data) as i64
     }
 
     /// Upload an icon file to the server.
@@ -3717,6 +3764,12 @@ mod validation_tests {
         let users = client.users();
         assert_eq!(users.len(), 1);
         assert!(users[0].is_talking);
+    }
+
+    #[test]
+    fn crc32_matches_known_value() {
+        assert_eq!(Client::crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(Client::icon_path(42), "/icon_42");
     }
 
     #[test]
