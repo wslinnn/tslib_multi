@@ -103,7 +103,7 @@ arm64 与 x86_64 均已通过。
 - 对比与借鉴：`docs/teamspeak-js-learnings.md`
 - 迁移/API 差异流程：`docs/api-changes/README.md`，当前版本 `docs/api-changes/v0.2.0.md`
 - 变更摘要：`CHANGELOG.md`
-- 当前进度/剩余 backlog：`docs/handoff.md`
+- 当前进度/剩余 backlog：`docs/handoff.md`；完整施工清单：`docs/construction-todo.md`（C1–C7）
 
 **已完成**：B1 全部；B2 大部分（Connected 单次、配置接线、非 Opus codec、Bot 事件泵、并发查询、移动状态、重连恢复、FFI 事件泵、Java 缺失 native/EchoCanceller、User/ServerInfo 字段、kick/ban/ChannelJoined、权限提示、is_talking、热路径日志）；B4 低风险项（解码器清理、说话超时 O(log n)、采集/播放/混音缓冲复用、音频事件 `Arc` 负载、音频回调 `try_lock`、音频计数、固定 60 ms jitter/PLC、共享用户/频道快照）；FR-SC-02 脱敏；FR-FS-06 上传落盘校验；Python 历史写入/实时 server info/事件负载；FR-BD-05 JNI JSON/日志；FR-ST-02/03/04/05（`MaxClientsKind`、`PermissionHints.known`、删子树/环检测、满员过滤）；`AudioReceived.seq`。
 

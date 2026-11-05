@@ -85,37 +85,20 @@
 | 初始静音 | 默认 **true**（隐私安全），暂未做成 `ClientConfig` 字段 |
 | 组 whisper | 本轮不做 |
 | 命令结果等待 | 暂缓，需 actor/独立事件泵 |
-| Go/No-Go | 高风险低收益不做 |
+| Go/No-Go | 高风险项先设计/拍板，不默认丢弃 |
 
 ---
 
-## 3. 剩余 backlog
+## 3. 施工 backlog
 
-### P1（低风险、建议下一批）
+完整施工清单见 [`docs/construction-todo.md`](construction-todo.md)（C1–C7），已拍板：
 
-1. **PR-04 后续**：JNI/Python 读取改用快照；若要让 `users()`/`channels()` 本身零拷贝，需改返回类型（待拍板）。
-2. **FR-AU-05/07/08**：重采样、AEC 接入 AudioManager、设备格式协商（需真机验证）。
-3. **PR-06/07**：事件总线满载时控制事件不丢；慢 handler 不阻塞事件泵（需 actor 设计）。
-4. **PR-11**：解码器分片锁/复用缓冲（仅多线程调用 `process_incoming` 时有收益）。
+- `users()` / `channels()` 改为返回 `Arc<[User]>` / `Arc<[Channel]>`（允许破坏，需写迁移文档）。
+- 命令与事件采用分阶段 actor。
+- FR-FS-03 采用路径式 `download_file_to_path` / `upload_file_from_path`。
+- 下一批：**C1 正确性收尾**（FR-CN-03 剩余、FR-EV-02/03、PR-04 返回类型、绑定适配、FR-ST-05 旧接口、L2 watchdog）。
 
-### P1（需要设计/较大改动）
-
-- **FR-CN-02 命令结果**：先做 actor + 事件泵，再实现 `try_*` async 方法；不要在当前 `&mut Client` 上直接 await。
-- **完整事件流**：每消费者 `EventStream`、`notification` 兜底、慢消费者策略（同 actor）。
-- **FR-FS-03 流式/续传**：`download_file_to_path`/`upload_file_from_path`、`resume`/`seek`。
-- **音频管线**：FR-AU-05/07/08（重采样、AEC 接入、设备格式）。
-
-### P2（功能对齐，暂缓）
-
-- ServerQuery、TS6 Streams、管理命令层、头像/图标、完整 view/revision、客户端版本选择、组 whisper、Identity 格式互通/`uid(algorithm)`、trace/diagnostics、fuzz/协议文档。
-
-### 验证遗留
-
-- 真实 TS3/TS6 服务器集成测试。
-- Android 真机音频/AEC/功耗测试。
-- `docs/perf-baseline.md`、`docs/protocol-behavior.md`。
-- CI `cargo-semver-checks` / `cargo public-api`。
-- Java JUnit/仪器测试。
+后续批次：C2 actor/命令/事件、C3 文件流式、C4 音频硬化、C5 性能与 CI、C6 P2 能力、C7 验证。
 
 ---
 
