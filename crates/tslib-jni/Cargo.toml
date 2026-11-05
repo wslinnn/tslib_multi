@@ -20,6 +20,7 @@ tslib-channel = { path = "../tslib-channel" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 log = "0.4"
+serde_json.workspace = true
 android_logger = "0.14"
 tracing-log = "0.2"
 

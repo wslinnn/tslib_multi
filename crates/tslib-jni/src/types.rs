@@ -135,6 +135,25 @@ pub fn create_java_server_info<'a>(env: &mut JNIEnv<'a>, info: &ServerInfo) -> J
 }
 
 /// Create a Java `dev.tslib.Event` from a Rust `Event`.
+/// Serialize file entries for the Java `Event.files` JSON string.
+///
+/// `serde_json` handles quotes, backslashes and control characters that the
+/// previous hand-written formatter did not escape.
+fn file_list_to_json(files: &[tslib_core::FileEntry]) -> String {
+    let files: Vec<serde_json::Value> = files
+        .iter()
+        .map(|file| {
+            serde_json::json!({
+                "name": file.name,
+                "size": file.size,
+                "datetime": file.datetime,
+                "is_file": file.is_file,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(files).to_string()
+}
+
 pub fn create_java_event<'a>(
     env: &mut JNIEnv<'a>,
     event: &tslib_core::events::Event,
@@ -367,13 +386,7 @@ pub fn create_java_event<'a>(
         Event::FileListReceived { channel_id, path, files } => {
             put_long(env, &map, "channel_id", *channel_id as i64);
             put_string(env, &map, "path", path);
-            // Serialize files as JSON array string
-            let files_json: Vec<String> = files.iter().map(|f| {
-                format!(r#"{{"name":"{}","size":{},"datetime":{},"is_file":{}}}"#,
-                    f.name.replace('\\', "\\\\").replace('"', "\\\""),
-                    f.size, f.datetime, f.is_file)
-            }).collect();
-            put_string(env, &map, "files", &format!("[{}]", files_json.join(",")));
+            put_string(env, &map, "files", &file_list_to_json(files));
             "file_list_received"
         }
         Event::CommandError { error_id, message } => {
@@ -408,5 +421,33 @@ fn connection_state_to_int(state: tslib_core::ConnectionState) -> i32 {
         tslib_core::ConnectionState::Connected => 2,
         tslib_core::ConnectionState::Initializing => 3,
         tslib_core::ConnectionState::Reconnecting => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_list_json_escapes_special_characters() {
+        let files = vec![tslib_core::FileEntry {
+            name: "a\"b\\c\n.txt".to_string(),
+            size: 42,
+            datetime: 123,
+            is_file: true,
+        }];
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&file_list_to_json(&files)).unwrap();
+
+        assert_eq!(parsed[0]["name"], "a\"b\\c\n.txt");
+        assert_eq!(parsed[0]["size"], 42);
+        assert_eq!(parsed[0]["datetime"], 123);
+        assert_eq!(parsed[0]["is_file"], true);
+    }
+
+    #[test]
+    fn file_list_json_empty() {
+        assert_eq!(file_list_to_json(&[]), "[]");
     }
 }

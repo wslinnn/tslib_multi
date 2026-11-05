@@ -76,6 +76,8 @@
 - BBCode HTML 渲染对标签外文本和属性做 HTML 转义，拒绝 `javascript:`/`data:` 等显式 scheme，非法颜色/字号降级为纯文本。
 - 修复 `<script>`、`javascript:` 链接、`data:` 图片等 XSS 向量。
 - `ClientConfig`、`ClientConfigBuilder` 的 `Debug` 不再输出服务器密码/频道密码，改为 `<redacted>`。
+- JNI `FileListReceived.files` 改用 `serde_json` 序列化，文件名中的引号、反斜杠、控制字符不再破坏 JSON。
+- JNI 发布构建日志级别固定为 `Info`（debug 构建为 `Trace`）；Rust 侧不再在日志中输出消息正文，只记录长度。
 
 ### Migration
 

@@ -989,7 +989,7 @@ impl Client {
                             poker_name: invoker.name.clone(),
                             message: message.clone(),
                         };
-                        debug!("Poked by {} ({}): {}", invoker.name, invoker.id.0, message);
+                        debug!("Poked by {} ({})", invoker.name, invoker.id.0);
                         Some(event)
                     }
                     _ => {
@@ -1833,7 +1833,7 @@ impl Client {
             .as_mut()
             .ok_or(ConnectionError::NotConnected)?;
 
-        debug!("Sending server message: {}", msg);
+        debug!("Sending server message ({} chars)", msg.chars().count());
 
         // Get state and create message command, then send it
         con.get_state()
@@ -1854,7 +1854,7 @@ impl Client {
             .as_mut()
             .ok_or(ConnectionError::NotConnected)?;
 
-        debug!("Sending channel message: {}", msg);
+        debug!("Sending channel message ({} chars)", msg.chars().count());
 
         // Get state and create message command, then send it
         con.get_state()
@@ -1875,7 +1875,11 @@ impl Client {
             .as_mut()
             .ok_or(ConnectionError::NotConnected)?;
 
-        debug!("Sending private message to {}: {}", user_id, msg);
+        debug!(
+            "Sending private message to {} ({} chars)",
+            user_id,
+            msg.chars().count()
+        );
 
         // Get state and create message command, then send it
         con.get_state()
@@ -1896,7 +1900,11 @@ impl Client {
             .as_mut()
             .ok_or(ConnectionError::NotConnected)?;
 
-        debug!("Sending poke to {}: {}", user_id, msg);
+        debug!(
+            "Sending poke to {} ({} chars)",
+            user_id,
+            msg.chars().count()
+        );
 
         con.get_state()
             .map_err(|e| Error::Internal(e.to_string()))?

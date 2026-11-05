@@ -14,10 +14,17 @@ use jni::JNIEnv;
 /// Called when the native library is loaded via `System.loadLibrary`.
 #[unsafe(no_mangle)]
 pub extern "system" fn JNI_OnLoad(_vm: jni::JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
-    // Initialize Android logger so Rust log macros output to logcat
+    // Initialize Android logger so Rust log macros output to logcat.
+    // Debug builds get Trace for development; release builds stay at Info so
+    // payloads and protocol details are not written to the device log.
+    let max_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Trace
+    } else {
+        log::LevelFilter::Info
+    };
     android_logger::init_once(
         android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Trace)
+            .with_max_level(max_level)
             .with_tag("tslib-jni"),
     );
 
