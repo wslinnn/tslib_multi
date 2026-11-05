@@ -10,6 +10,7 @@
 - `FileTransferConfig`（默认 64 MiB 内存上限、30 s 空闲超时、64 KiB 分块）及 `Client::set_file_transfer_config` / `Client::file_transfer_config`。
 - `FileTransferConfig::unlimited()`，用于显式关闭内存上限与空闲超时。
 - `Error::InvalidArgument`，用于调用方参数校验失败。
+- `Error::FileTransferCorrupted`，用于上传后服务器落盘大小与本地不一致。
 - `AudioError::UnsupportedCodec`，用于非 Opus 频道。
 - Java `Client.moveToChannel(long, String)` 重载，支持频道密码。
 - `Client` 新增 `download_file_with_password`、`upload_file_with_password`、`list_files_with_password`、`delete_file_with_password`、`rename_file_with_password`、`create_directory_with_password`。
@@ -27,6 +28,7 @@
 
 - `Channel.order` 由 `i32` 改为 `u64`，语义明确为“前驱频道 id”；Java `Channel.order` 同步为 `long`，Python 暴露为 `u64`。
 - `Event::AudioReceived.data` 由 `Vec<u8>` 改为 `Arc<[u8]>`，广播订阅者与返回事件共享同一份音频负载。
+- 上传完成事件改为在 `ftgetfileinfo` 校验服务器落盘大小后发出；无浏览权限（2568）记录 warning 后视为成功。
 - 频道树按 `channel_order` 前驱链还原兄弟顺序，不再按数值排序；环/缺失前驱按 id 回退。
 - `ChannelTree::add_channel` 每次重建结构，重复/乱序插入不再产生重复节点。
 - 文件传输改为按 chunk 读写、每个 chunk 重置 idle timeout，移除 5 s/10 s 总超时。

@@ -98,6 +98,21 @@ struct PendingPermOverview {
     perms: HashMap<u32, i32>,
 }
 
+/// In-flight upload; kept until the file transfer stream finishes.
+struct PendingUpload {
+    channel_id: u64,
+    path: String,
+    data: Vec<u8>,
+    password: Option<String>,
+}
+
+/// In-flight `ftgetfileinfo` verification, keyed by the server return code.
+struct PendingFileInfo {
+    channel_id: u64,
+    path: String,
+    expected_size: u64,
+}
+
 fn validate_audio_payload(data_len: usize) -> Result<()> {
     if data_len > MAX_AUDIO_PAYLOAD {
         return Err(Error::InvalidArgument(format!(
@@ -234,8 +249,10 @@ pub struct Client {
     talk_deadlines: BTreeSet<(Instant, u16)>,
     /// Pending file downloads: FiletransferHandle id -> (channel_id, path)
     pending_downloads: HashMap<u16, (u64, String)>,
-    /// Pending file uploads: FiletransferHandle id -> (channel_id, path, data)
-    pending_uploads: HashMap<u16, (u64, String, Vec<u8>)>,
+    /// Pending file uploads: FiletransferHandle id -> upload state
+    pending_uploads: HashMap<u16, PendingUpload>,
+    /// Pending upload size verifications: return code -> request state
+    pending_file_infos: HashMap<u16, PendingFileInfo>,
     /// Local override for our own input muted state.
     /// tsclientlib's state book doesn't reflect our clientupdate commands
     /// (the server doesn't echo them back), so we track it separately.
@@ -283,6 +300,7 @@ impl Client {
             talk_deadlines: BTreeSet::new(),
             pending_downloads: HashMap::new(),
             pending_uploads: HashMap::new(),
+            pending_file_infos: HashMap::new(),
             self_input_muted: None,
             pending_file_lists: HashMap::new(),
             pending_perm_overviews: HashMap::new(),
@@ -858,7 +876,13 @@ impl Client {
                 }
             }
             StreamItem::FileUpload(handle, mut result) => {
-                if let Some((channel_id, path, data)) = self.pending_uploads.remove(&handle.0) {
+                if let Some(upload) = self.pending_uploads.remove(&handle.0) {
+                    let PendingUpload {
+                        channel_id,
+                        path,
+                        data,
+                        password,
+                    } = upload;
                     let offset = match usize::try_from(result.seek_position) {
                         Ok(offset) if offset <= data.len() => offset,
                         Ok(offset) => {
@@ -893,9 +917,16 @@ impl Client {
                     {
                         Ok(()) => {
                             info!("Upload complete: {} ({} bytes)", path, data.len());
-                            let event = Event::FileUploaded { channel_id, path };
-                            let _ = self.event_tx.send(event.clone());
-                            vec![event]
+                            // Ask the server to confirm the size it persisted.
+                            // The FileUploaded event is emitted when the
+                            // ftgetfileinfo response arrives, or immediately if
+                            // verification cannot be requested.
+                            self.verify_uploaded_file(
+                                channel_id,
+                                &path,
+                                data.len() as u64,
+                                password.as_deref(),
+                            )
                         }
                         Err(error) => {
                             warn!("Upload failed: {} — {}", path, error);
@@ -913,7 +944,11 @@ impl Client {
                 let (_channel_id, path) = self
                     .pending_downloads
                     .remove(&handle.0)
-                    .or_else(|| self.pending_uploads.remove(&handle.0).map(|(ch, p, _)| (ch, p)))
+                    .or_else(|| {
+                        self.pending_uploads
+                            .remove(&handle.0)
+                            .map(|upload| (upload.channel_id, upload.path))
+                    })
                     .unwrap_or((0, String::new()));
 
                 warn!("File transfer failed: path={}, error={}", path, error);
@@ -1379,6 +1414,70 @@ impl Client {
                 let _ = self.event_tx.send(event.clone());
                 vec![event]
             }
+            InMessage::FileInfo(ref info) => {
+                let key = info
+                    .return_code
+                    .as_ref()
+                    .and_then(|code| code.parse::<u16>().ok());
+                let key = match key {
+                    Some(key) if self.pending_file_infos.contains_key(&key) => Some(key),
+                    _ => info.iter().next().and_then(|part| {
+                        self.pending_file_infos
+                            .iter()
+                            .find(|(_, pending)| {
+                                pending.channel_id == part.channel_id.0
+                                    && (pending.path == part.name
+                                        || pending.path.ends_with(&format!("/{}", part.name)))
+                            })
+                            .map(|(key, _)| *key)
+                    }),
+                };
+
+                let Some(key) = key else {
+                    log::warn!("fileinfo response without a pending upload verification");
+                    return Vec::new();
+                };
+                let Some(pending) = self.pending_file_infos.remove(&key) else {
+                    return Vec::new();
+                };
+
+                match info.iter().next().map(|part| part.size) {
+                    Some(size) if size == pending.expected_size => {
+                        debug!("Upload verified: {} ({} bytes)", pending.path, size);
+                        let event = Event::FileUploaded {
+                            channel_id: pending.channel_id,
+                            path: pending.path,
+                        };
+                        let _ = self.event_tx.send(event.clone());
+                        vec![event]
+                    }
+                    Some(size) => {
+                        let error = Error::FileTransferCorrupted(format!(
+                            "size mismatch for {}: expected {} bytes, server reports {}",
+                            pending.path, pending.expected_size, size
+                        ));
+                        warn!("Upload verification failed: {}", error);
+                        let event = Event::FileTransferFailed {
+                            path: pending.path,
+                            error: error.to_string(),
+                        };
+                        let _ = self.event_tx.send(event.clone());
+                        vec![event]
+                    }
+                    None => {
+                        warn!(
+                            "Upload verification for {} returned no file entry",
+                            pending.path
+                        );
+                        let event = Event::FileUploaded {
+                            channel_id: pending.channel_id,
+                            path: pending.path,
+                        };
+                        let _ = self.event_tx.send(event.clone());
+                        vec![event]
+                    }
+                }
+            }
             InMessage::CommandError(ref err) => {
                 for part in err.iter() {
                     debug!("CommandError: id={:?}, msg={}", part.id, part.message);
@@ -1437,12 +1536,49 @@ impl Client {
                             }
                         }
 
-                        let event = Event::CommandError {
-                            error_id,
-                            message: part.message.clone(),
-                        };
-                        let _ = self.event_tx.send(event.clone());
-                        events.push(event);
+                        // Failed upload verification. The transfer itself
+                        // already completed, so only missing browse permission
+                        // (2568) is tolerated; other server errors mean the
+                        // file could not be confirmed.
+                        let mut verification_handled = false;
+                        if let Some(key) = return_code {
+                            if let Some(pending) = self.pending_file_infos.remove(&key) {
+                                verification_handled = true;
+                                if error_id == 2568 {
+                                    warn!(
+                                        "Upload verification skipped for {}: no file browse permission",
+                                        pending.path
+                                    );
+                                    let event = Event::FileUploaded {
+                                        channel_id: pending.channel_id,
+                                        path: pending.path,
+                                    };
+                                    let _ = self.event_tx.send(event.clone());
+                                    events.push(event);
+                                } else {
+                                    let error = Error::server(error_id, part.message.clone());
+                                    warn!(
+                                        "Upload verification failed for {}: {}",
+                                        pending.path, error
+                                    );
+                                    let event = Event::FileTransferFailed {
+                                        path: pending.path,
+                                        error: error.to_string(),
+                                    };
+                                    let _ = self.event_tx.send(event.clone());
+                                    events.push(event);
+                                }
+                            }
+                        }
+
+                        if !verification_handled {
+                            let event = Event::CommandError {
+                                error_id,
+                                message: part.message.clone(),
+                            };
+                            let _ = self.event_tx.send(event.clone());
+                            events.push(event);
+                        }
                     }
                 }
                 events
@@ -1879,9 +2015,74 @@ impl Client {
         let handle = con.upload_file(
             ChannelId(channel_id), path, password, data.len() as u64, overwrite, false,
         ).map_err(|e| Error::Internal(e.to_string()))?;
-        self.pending_uploads.insert(handle.0, (channel_id, path.to_string(), data.to_vec()));
+        self.pending_uploads.insert(handle.0, PendingUpload {
+            channel_id,
+            path: path.to_string(),
+            data: data.to_vec(),
+            password: password.map(str::to_string),
+        });
         debug!("Started upload: channel={}, path={}, size={}", channel_id, path, data.len());
         Ok(())
+    }
+
+    /// Ask the server for the size it persisted after an upload stream closed.
+    ///
+    /// `FileUploaded` is deferred until the `ftgetfileinfo` response confirms
+    /// the size. If the request cannot be sent (for example the connection
+    /// dropped after the transfer), the upload is reported as successful with
+    /// a warning instead of hanging in a pending state.
+    fn verify_uploaded_file(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        expected_size: u64,
+        password: Option<&str>,
+    ) -> Vec<Event> {
+        let send_result = match self.connection.as_mut() {
+            Some(con) => {
+                let mut cmd = OutCommand::new(
+                    Direction::C2S,
+                    Flags::empty(),
+                    PacketType::Command,
+                    "ftgetfileinfo",
+                );
+                cmd.write_arg("cid", &channel_id);
+                cmd.write_arg("cpw", &encode_channel_password(password));
+                cmd.write_arg("name", &path);
+                cmd.send_with_result(con).map_err(|e| e.to_string())
+            }
+            None => Err("not connected".to_string()),
+        };
+
+        match send_result {
+            Ok(handle) => {
+                self.pending_file_infos.insert(
+                    handle.0,
+                    PendingFileInfo {
+                        channel_id,
+                        path: path.to_string(),
+                        expected_size,
+                    },
+                );
+                debug!(
+                    "Requested upload verification: channel={}, path={}, size={}",
+                    channel_id, path, expected_size
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                warn!(
+                    "Upload verification request failed for {}: {}; reporting success",
+                    path, error
+                );
+                let event = Event::FileUploaded {
+                    channel_id,
+                    path: path.to_string(),
+                };
+                let _ = self.event_tx.send(event.clone());
+                vec![event]
+            }
+        }
     }
 
     /// Request the file list for a channel directory
@@ -2601,6 +2802,7 @@ mod validation_tests {
             talk_deadlines: BTreeSet::new(),
             pending_downloads: HashMap::new(),
             pending_uploads: HashMap::new(),
+            pending_file_infos: HashMap::new(),
             self_input_muted: None,
             pending_file_lists: HashMap::new(),
             pending_perm_overviews: HashMap::new(),

@@ -36,6 +36,10 @@ pub enum Error {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// File transfer completed but the server copy does not match what was sent
+    #[error("File transfer corrupted: {0}")]
+    FileTransferCorrupted(String),
+
     /// Timeout errors
     #[error("Operation timed out")]
     Timeout,
@@ -194,5 +198,15 @@ mod tests {
     #[test]
     fn error_display_timeout() {
         assert_eq!(format!("{}", Error::Timeout), "Operation timed out");
+    }
+
+    #[test]
+    fn file_transfer_corrupted_display() {
+        let err = Error::FileTransferCorrupted("expected 10 bytes, got 9".into());
+        assert_eq!(
+            format!("{}", err),
+            "File transfer corrupted: expected 10 bytes, got 9"
+        );
+        assert!(!err.is_recoverable());
     }
 }
