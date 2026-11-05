@@ -202,6 +202,11 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("server_name", server_name);
             let _ = dict.set_item("welcome_message", welcome_message.as_deref());
         }
+        Event::Reconnected { server_name, welcome_message } => {
+            let _ = dict.set_item("type", "reconnected");
+            let _ = dict.set_item("server_name", server_name);
+            let _ = dict.set_item("welcome_message", welcome_message.as_deref());
+        }
         Event::Disconnected { reason } => {
             let _ = dict.set_item("type", "disconnected");
             let _ = dict.set_item("reason", reason);

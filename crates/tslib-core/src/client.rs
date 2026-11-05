@@ -362,8 +362,18 @@ impl Client {
         }
 
         // Now process the collected items
+        let mut saw_book_events = false;
         for item in stream_items {
+            if matches!(item, StreamItem::BookEvents(_)) {
+                saw_book_events = true;
+            }
             events.extend(self.process_stream_item(item).await);
+        }
+
+        if saw_book_events && self.state == ConnectionState::Reconnecting {
+            if let Some(event) = self.restore_after_reconnect() {
+                events.push(event);
+            }
         }
 
         if disconnected {
@@ -431,8 +441,18 @@ impl Client {
             }
         }
 
+        let mut saw_book_events = false;
         for item in stream_items {
+            if matches!(item, StreamItem::BookEvents(_)) {
+                saw_book_events = true;
+            }
             events.extend(self.process_stream_item(item).await);
+        }
+
+        if saw_book_events && self.state == ConnectionState::Reconnecting {
+            if let Some(event) = self.restore_after_reconnect() {
+                events.push(event);
+            }
         }
 
         if disconnected {
@@ -502,6 +522,43 @@ impl Client {
                 event
             })
             .collect()
+    }
+
+    /// Restore session-scoped state after the dependency reconnects.
+    fn restore_after_reconnect(&mut self) -> Option<Event> {
+        self.state = ConnectionState::Connected;
+
+        if let Err(e) = self.subscribe_all_channels() {
+            warn!("Reconnect: failed to resubscribe channels: {}", e);
+        }
+        if let Err(e) = self.sync_state() {
+            warn!("Reconnect: failed to sync state: {}", e);
+        }
+        if let Err(e) = self.send_server_variables() {
+            warn!("Reconnect: failed to request server variables: {}", e);
+        }
+        if let Some(muted) = self.self_input_muted {
+            if let Err(e) = self.set_input_muted(muted) {
+                warn!("Reconnect: failed to restore input mute: {}", e);
+            }
+        }
+
+        // Client/channel ids from the previous session are invalid.
+        self.whisper_clients.clear();
+        self.whisper_channels.clear();
+
+        let event = Event::Reconnected {
+            server_name: self.server_state.server.name.clone(),
+            welcome_message: self.server_state.server.welcome_message.clone(),
+        };
+        let _ = self.event_tx.send(event.clone());
+        info!(
+            "Reconnected to {} - {} users, {} channels",
+            self.server_state.server.name,
+            self.server_state.users.len(),
+            self.server_state.channels.len()
+        );
+        Some(event)
     }
 
     /// Wait for the initial connection to be established

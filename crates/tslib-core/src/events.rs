@@ -20,6 +20,11 @@ pub enum Event {
         server_name: String,
         welcome_message: Option<String>,
     },
+    /// Reconnected after a temporary connection loss
+    Reconnected {
+        server_name: String,
+        welcome_message: Option<String>,
+    },
     /// Disconnected from the server
     Disconnected { reason: String },
     /// Connection lost unexpectedly
@@ -211,6 +216,9 @@ pub trait EventHandler: Send + Sync {
         // Default implementation dispatches to specific handlers
         match event {
             Event::Connected { server_name, welcome_message } => {
+                self.on_connected(server_name, welcome_message.as_deref()).await;
+            }
+            Event::Reconnected { server_name, welcome_message } => {
                 self.on_connected(server_name, welcome_message.as_deref()).await;
             }
             Event::Disconnected { reason } => {

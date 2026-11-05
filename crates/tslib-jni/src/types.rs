@@ -204,6 +204,13 @@ pub fn create_java_event<'a>(
             }
             "connected"
         }
+        Event::Reconnected { server_name, welcome_message } => {
+            put_string(env, &map, "server_name", server_name);
+            if let Some(msg) = welcome_message {
+                put_string(env, &map, "welcome_message", msg);
+            }
+            "reconnected"
+        }
         Event::Disconnected { reason } => {
             put_string(env, &map, "reason", reason);
             "disconnected"
