@@ -95,6 +95,25 @@ pub struct ServerInfo {
     pub host_banner_gfx_url: Option<String>,
 }
 
+/// Structured interpretation of a channel's `max_clients` value.
+///
+/// The legacy `Channel::max_clients: i32` conflates "unlimited" (-1),
+/// "inherit from parent" (-1) and "not synchronized yet" (-1). This enum keeps
+/// the distinction so capacity checks can resolve `Inherited` through the
+/// channel tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaxClientsKind {
+    /// No limit.
+    Unlimited,
+    /// Use the parent channel's limit.
+    Inherited,
+    /// Explicit limit.
+    Limited(u16),
+    /// The server did not send a value (or old serialized data).
+    #[default]
+    Unknown,
+}
+
 /// Channel information
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Channel {
@@ -124,8 +143,12 @@ pub struct Channel {
     pub codec_quality: u8,
     /// Maximum clients (-1 for unlimited)
     pub max_clients: i32,
+    /// Structured max clients value; `max_clients` is kept for compatibility
+    pub max_clients_kind: MaxClientsKind,
     /// Max family clients
     pub max_family_clients: i32,
+    /// Structured max family clients value
+    pub max_family_clients_kind: MaxClientsKind,
     /// Needed talk power
     pub needed_talk_power: i32,
     /// Channel icon ID
@@ -153,11 +176,20 @@ impl Channel {
     }
 
     /// Check if channel is full
+    ///
+    /// `Inherited` limits are not resolved here because that needs the parent
+    /// chain; use `ChannelTree::is_full` for an effective-limit check.
     pub fn is_full(&self, current_users: usize) -> bool {
-        if self.is_unlimited() {
-            false
-        } else {
-            current_users >= self.max_clients as usize
+        match self.max_clients_kind {
+            MaxClientsKind::Limited(limit) => current_users >= limit as usize,
+            MaxClientsKind::Unlimited => false,
+            _ => {
+                if self.is_unlimited() {
+                    false
+                } else {
+                    current_users >= self.max_clients as usize
+                }
+            }
         }
     }
 }
@@ -306,6 +338,24 @@ mod tests {
         assert!(ch.is_full(2));
         assert!(ch.is_full(3));
         assert!(!ch.is_full(1));
+    }
+
+    #[test]
+    fn full_channel_uses_structured_limit() {
+        let ch = Channel {
+            max_clients: 2,
+            max_clients_kind: MaxClientsKind::Limited(2),
+            ..Default::default()
+        };
+        assert!(!ch.is_full(1));
+        assert!(ch.is_full(2));
+
+        let inherited = Channel {
+            max_clients: -1,
+            max_clients_kind: MaxClientsKind::Inherited,
+            ..Default::default()
+        };
+        assert!(!inherited.is_full(100));
     }
 
     #[test]

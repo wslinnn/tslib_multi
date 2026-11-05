@@ -1,6 +1,6 @@
 //! Channel tree structure
 
-use tslib_core::state::Channel;
+use tslib_core::state::{Channel, MaxClientsKind};
 use std::collections::{HashMap, HashSet};
 
 /// Order siblings by the TS3 `channel_order` predecessor chain.
@@ -137,6 +137,56 @@ impl ChannelTree {
     /// Get a channel by ID
     pub fn get(&self, id: u64) -> Option<&Channel> {
         self.channels.get(&id)
+    }
+
+    /// Resolve the effective member limit, following `Inherited` up the
+    /// parent chain.
+    ///
+    /// Falls back to the legacy `max_clients` when the structured kind is
+    /// `Unknown` (for example channel objects from older serialized data).
+    /// A root without an explicit limit inherits the server default, which is
+    /// unlimited.
+    pub fn effective_max_clients(&self, id: u64) -> MaxClientsKind {
+        let mut current = self.channels.get(&id);
+        let mut visited = 0usize;
+
+        while let Some(channel) = current {
+            match channel.max_clients_kind {
+                MaxClientsKind::Limited(_) | MaxClientsKind::Unlimited => {
+                    return channel.max_clients_kind;
+                }
+                MaxClientsKind::Unknown => {
+                    return if channel.max_clients < 0 {
+                        MaxClientsKind::Unknown
+                    } else {
+                        MaxClientsKind::Limited(channel.max_clients as u16)
+                    };
+                }
+                MaxClientsKind::Inherited => {}
+            }
+
+            if channel.parent_id == 0 || channel.parent_id == channel.id {
+                break;
+            }
+            visited += 1;
+            if visited > self.channels.len() {
+                break;
+            }
+            current = self.channels.get(&channel.parent_id);
+        }
+
+        MaxClientsKind::Unlimited
+    }
+
+    /// Check whether a channel is full given its current direct member count.
+    ///
+    /// `Unknown` limits are treated as not full, matching the legacy
+    /// `max_clients == -1` behaviour.
+    pub fn is_full(&self, id: u64, occupied: usize) -> bool {
+        match self.effective_max_clients(id) {
+            MaxClientsKind::Limited(limit) => occupied >= limit as usize,
+            _ => false,
+        }
     }
 
     /// Get root channels
@@ -481,5 +531,72 @@ mod tests {
         let tree = ChannelTree::from_channels(vec![ch(1, 0, "A", 99)]);
         assert_eq!(tree.roots().len(), 1);
         assert_eq!(tree.roots()[0].name, "A");
+    }
+
+    #[test]
+    fn inherited_limit_resolves_through_parent() {
+        let mut tree = ChannelTree::new();
+        tree.add_channel(Channel {
+            id: 1,
+            max_clients: 2,
+            max_clients_kind: MaxClientsKind::Limited(2),
+            ..Default::default()
+        });
+        tree.add_channel(Channel {
+            id: 2,
+            parent_id: 1,
+            max_clients: -1,
+            max_clients_kind: MaxClientsKind::Inherited,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            tree.effective_max_clients(2),
+            MaxClientsKind::Limited(2)
+        );
+        assert!(!tree.is_full(2, 1));
+        assert!(tree.is_full(2, 2));
+    }
+
+    #[test]
+    fn inherited_without_parent_limit_is_unlimited() {
+        let mut tree = ChannelTree::new();
+        tree.add_channel(Channel {
+            id: 1,
+            max_clients: -1,
+            max_clients_kind: MaxClientsKind::Unlimited,
+            ..Default::default()
+        });
+        tree.add_channel(Channel {
+            id: 2,
+            parent_id: 1,
+            max_clients: -1,
+            max_clients_kind: MaxClientsKind::Inherited,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            tree.effective_max_clients(2),
+            MaxClientsKind::Unlimited
+        );
+        assert!(!tree.is_full(2, 100));
+    }
+
+    #[test]
+    fn unknown_limit_falls_back_to_legacy_value() {
+        let mut tree = ChannelTree::new();
+        tree.add_channel(Channel {
+            id: 1,
+            max_clients: 3,
+            max_clients_kind: MaxClientsKind::Unknown,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            tree.effective_max_clients(1),
+            MaxClientsKind::Limited(3)
+        );
+        assert!(tree.is_full(1, 3));
+        assert!(!tree.is_full(1, 2));
     }
 }

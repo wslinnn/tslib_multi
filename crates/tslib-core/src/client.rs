@@ -7,7 +7,7 @@ use crate::config::{ClientConfig, FileTransferConfig};
 use crate::connection::ConnectionState;
 use crate::error::{ConnectionError, Error, Result};
 use crate::events::{AudioCodec, Event, EventHandler};
-use crate::state::{Channel, ServerInfo, ServerState, User};
+use crate::state::{Channel, MaxClientsKind, ServerInfo, ServerState, User};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2431,6 +2431,17 @@ fn ts_client_to_user(client: &TsClient) -> User {
     }
 }
 
+/// Convert a dependency `MaxClients` value into the legacy `i32` plus the
+/// structured kind that preserves Unlimited/Inherited/Unknown.
+fn max_clients_from_ts(value: Option<tsproto_types::MaxClients>) -> (i32, MaxClientsKind) {
+    match value {
+        Some(tsproto_types::MaxClients::Unlimited) => (-1, MaxClientsKind::Unlimited),
+        Some(tsproto_types::MaxClients::Inherited) => (-1, MaxClientsKind::Inherited),
+        Some(tsproto_types::MaxClients::Limited(n)) => (n as i32, MaxClientsKind::Limited(n)),
+        None => (-1, MaxClientsKind::Unknown),
+    }
+}
+
 /// Convert tsclientlib Channel to our Channel type
 fn ts_channel_to_channel(channel: &TsChannel) -> Channel {
     let (is_permanent, is_semi_permanent) = match channel.channel_type {
@@ -2442,22 +2453,9 @@ fn ts_channel_to_channel(channel: &TsChannel) -> Channel {
     // Extract description from optional data
     let description = channel.optional_data.as_ref().map(|o| o.description.clone());
 
-    // Convert MaxClients enum to i32 (-1 for unlimited)
-    let max_clients = channel.max_clients
-        .map(|m| match m {
-            tsproto_types::MaxClients::Unlimited => -1,
-            tsproto_types::MaxClients::Inherited => -1,
-            tsproto_types::MaxClients::Limited(n) => n as i32,
-        })
-        .unwrap_or(-1);
-
-    let max_family_clients = channel.max_family_clients
-        .map(|m| match m {
-            tsproto_types::MaxClients::Unlimited => -1,
-            tsproto_types::MaxClients::Inherited => -1,
-            tsproto_types::MaxClients::Limited(n) => n as i32,
-        })
-        .unwrap_or(-1);
+    let (max_clients, max_clients_kind) = max_clients_from_ts(channel.max_clients);
+    let (max_family_clients, max_family_clients_kind) =
+        max_clients_from_ts(channel.max_family_clients);
 
     Channel {
         id: channel.id.0,
@@ -2473,7 +2471,9 @@ fn ts_channel_to_channel(channel: &TsChannel) -> Channel {
         codec: ts_codec_to_u8(channel.codec),
         codec_quality: channel.codec_quality.unwrap_or(7),
         max_clients,
+        max_clients_kind,
         max_family_clients,
+        max_family_clients_kind,
         needed_talk_power: channel.needed_talk_power.unwrap_or(0),
         icon_id: channel.icon.map(|i| i.0 as i64).unwrap_or(0),
         is_subscribed: channel.subscribed,

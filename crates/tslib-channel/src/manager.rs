@@ -1,7 +1,7 @@
 //! Channel management
 
 use crate::tree::ChannelTree;
-use tslib_core::state::Channel;
+use tslib_core::state::{Channel, MaxClientsKind};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -88,6 +88,11 @@ impl ChannelManager {
     }
 
     /// Get joinable channels (not full, no password or we know it)
+    ///
+    /// This cannot check capacity because the manager does not track users;
+    /// use [`Self::joinable_channels_for_users`] or
+    /// [`Self::joinable_channels_with_occupancy`] when member counts are
+    /// available.
     pub async fn joinable_channels(&self) -> Vec<Channel> {
         self.tree
             .read()
@@ -96,6 +101,36 @@ impl ChannelManager {
             .into_iter()
             .cloned()
             .collect()
+    }
+
+    /// Get joinable channels, excluding channels that are full for the given
+    /// users.
+    pub async fn joinable_channels_for_users(&self, users: &[tslib_core::User]) -> Vec<Channel> {
+        use std::collections::HashMap;
+
+        let mut occupied: HashMap<u64, usize> = HashMap::new();
+        for user in users {
+            *occupied.entry(user.channel_id).or_insert(0) += 1;
+        }
+        self.joinable_channels_with_occupancy(|id| occupied.get(&id).copied().unwrap_or(0))
+            .await
+    }
+
+    /// Get joinable channels, excluding channels whose direct member count
+    /// (provided by `occupied`) reaches their effective `max_clients`.
+    ///
+    /// `Inherited` limits are resolved through the channel tree.
+    pub async fn joinable_channels_with_occupancy<F>(&self, occupied: F) -> Vec<Channel>
+    where
+        F: Fn(u64) -> usize,
+    {
+        let tree = self.tree.read().await;
+        tree.find_all(|c| {
+            !c.has_password && !c.is_spacer() && !tree.is_full(c.id, occupied(c.id))
+        })
+        .into_iter()
+        .cloned()
+        .collect()
     }
 
     /// Print tree structure
@@ -209,6 +244,12 @@ impl ChannelBuilder {
 
     /// Build the channel (for local use, not server creation)
     pub fn build(self) -> Option<Channel> {
+        let max_clients_kind = if self.max_clients < 0 {
+            MaxClientsKind::Unlimited
+        } else {
+            MaxClientsKind::Limited(self.max_clients as u16)
+        };
+
         Some(Channel {
             id: 0, // Will be assigned by server
             parent_id: self.parent_id,
@@ -223,7 +264,9 @@ impl ChannelBuilder {
             codec: self.codec,
             codec_quality: self.codec_quality,
             max_clients: self.max_clients,
+            max_clients_kind,
             max_family_clients: -1,
+            max_family_clients_kind: MaxClientsKind::Unlimited,
             needed_talk_power: 0,
             icon_id: 0,
             is_subscribed: false,
@@ -390,6 +433,45 @@ mod tests {
         let joinable = mgr.joinable_channels().await;
         assert_eq!(joinable.len(), 1);
         assert_eq!(joinable[0].name, "Normal");
+    }
+
+    #[tokio::test]
+    async fn manager_joinable_excludes_full_channels() {
+        let mgr = ChannelManager::new();
+        mgr.add_channel(Channel {
+            id: 1,
+            name: "Full".into(),
+            max_clients: 1,
+            max_clients_kind: MaxClientsKind::Limited(1),
+            ..Default::default()
+        })
+        .await;
+        mgr.add_channel(Channel {
+            id: 2,
+            name: "Open".into(),
+            max_clients: 5,
+            max_clients_kind: MaxClientsKind::Limited(5),
+            ..Default::default()
+        })
+        .await;
+
+        let joinable = mgr
+            .joinable_channels_with_occupancy(|id| if id == 1 { 1 } else { 0 })
+            .await;
+        assert_eq!(joinable.len(), 1);
+        assert_eq!(joinable[0].id, 2);
+
+        let users = vec![
+            tslib_core::User {
+                id: 1,
+                channel_id: 2,
+                ..Default::default()
+            };
+            5
+        ];
+        let joinable = mgr.joinable_channels_for_users(&users).await;
+        assert_eq!(joinable.len(), 1);
+        assert_eq!(joinable[0].id, 1);
     }
 
     #[tokio::test]

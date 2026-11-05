@@ -26,6 +26,9 @@
 - `ChatHistory::add_server_message` / `add_channel_message` / `add_private_message`（Rust 与 Python 同步）。
 - Python 事件字典补齐 `audio_received.data`、`file_downloaded.data`、`file_list_received.files`。
 - Python `Client.server_info()` 改为读取实时状态，不再返回上次同步的缓存。
+- `MaxClientsKind`（`Unlimited`/`Inherited`/`Limited`/`Unknown`）与 `Channel.max_clients_kind`、`max_family_clients_kind`。
+- `ChannelTree::effective_max_clients` / `is_full`，沿父链解析 `Inherited` 上限。
+- `ChannelManager::joinable_channels_for_users` / `joinable_channels_with_occupancy`，按人数排除满员频道。
 
 ### Changed
 
@@ -55,6 +58,7 @@
 - 说话超时改为有序截止时间检查：无人说话时零扫描，有更新时为 O(log n)。
 - 采集回调不再创建中间 `Vec`，帧缓冲从池中复用；播放与混音的 PCM 临时缓冲跨回调复用，稳态回调不再逐帧分配。
 - 采集/播放回调改用 `try_lock`：拿不到锁时丢弃本次采集或输出静音，实时线程不再等待网络/解码线程。
+- `Channel::is_full` 优先使用结构化上限；`max_clients` 保留原有 `-1` 语义。
 
 ### Fixed
 

@@ -14,6 +14,19 @@ pub struct PyChannelTree {
 }
 
 fn py_channel_to_core(c: &PyChannel) -> tslib_core::state::Channel {
+    use tslib_core::MaxClientsKind;
+
+    let max_clients_kind = if c.max_clients < 0 {
+        MaxClientsKind::Unlimited
+    } else {
+        MaxClientsKind::Limited(c.max_clients as u16)
+    };
+    let max_family_clients_kind = if c.max_family_clients < 0 {
+        MaxClientsKind::Unlimited
+    } else {
+        MaxClientsKind::Limited(c.max_family_clients as u16)
+    };
+
     tslib_core::state::Channel {
         id: c.id,
         parent_id: c.parent_id,
@@ -28,7 +41,9 @@ fn py_channel_to_core(c: &PyChannel) -> tslib_core::state::Channel {
         codec: c.codec,
         codec_quality: c.codec_quality,
         max_clients: c.max_clients,
+        max_clients_kind,
         max_family_clients: c.max_family_clients,
+        max_family_clients_kind,
         needed_talk_power: c.needed_talk_power,
         icon_id: c.icon_id,
         is_subscribed: c.is_subscribed,
