@@ -36,7 +36,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build
+          sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev
 
       # Compare each public library crate against the merge base / previous
       # commit. A breaking API change fails the job and must be documented in
