@@ -13,6 +13,8 @@
 - `AudioError::UnsupportedCodec`，用于非 Opus 频道。
 - Java `Client.moveToChannel(long, String)` 重载，支持频道密码。
 - `Client` 新增 `download_file_with_password`、`upload_file_with_password`、`list_files_with_password`、`delete_file_with_password`、`rename_file_with_password`、`create_directory_with_password`。
+- `Event::Reconnected`，用于区分首次连接与重连恢复。
+- FFI 新增 `tslib_client_wait_connected`、`tslib_client_pump`、文本/状态回调注册。
 
 ### Changed
 
@@ -27,6 +29,9 @@
 - `Connected` 只在状态同步后发送一次，不再重复。
 - Bot 每轮驱动 `wait_events`；owner-only 使用发送者 UID；插件命令在加载时注册；`BotConfig` 的密码/频道参数传入客户端。
 - `AudioManager` 仅对 Opus Voice/Music（4/5）解码，其他 codec 返回 `UnsupportedCodec`。
+- 文件列表/权限查询按 `return_code` 关联，支持并发；同一频道/路径重复请求返回 `InvalidArgument`。
+- `move_to_channel` 不再发送后立即写 `channel_id`，只在服务器确认后更新。
+- 重连后重订阅频道、同步状态、恢复静音，并清空失效的 whisper 目标。
 
 ### Fixed
 
@@ -39,6 +44,9 @@
 - Bot 不驱动事件流导致收不到消息；owner-only 永远失败；插件命令未注册。
 - 非 Opus 频道被喂给 Opus 解码器产生噪声。
 - Java `nativeMoveToChannel` 参数个数与 Rust 导出不一致，调用会 `UnsatisfiedLinkError`。
+- FFI 没有 runtime/事件泵，连接无法被驱动。
+- 文件列表/权限查询并发时互相覆盖。
+- 重连后订阅、静音和本地状态丢失。
 
 ### Security
 
