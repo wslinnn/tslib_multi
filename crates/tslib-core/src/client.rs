@@ -943,6 +943,10 @@ impl Client {
 
                     self.server_state.users.insert(user.id, user.clone());
 
+                    if Some(user.id) == self.client_id {
+                        self.channel_id = Some(user.channel_id);
+                    }
+
                     if from_channel != user.channel_id {
                         info!("User {} moved from channel {} to {}", user.nickname, from_channel, user.channel_id);
                         return Some(Event::UserMoved {
@@ -1507,7 +1511,9 @@ impl Client {
         cmd.send(con)
             .map_err(|e| Error::Internal(e.to_string()))?;
 
-        self.channel_id = Some(channel_id);
+        // `channel_id` is updated from the server's book event
+        // (`PropertyId::ClientChannel`) once the move is confirmed. Updating it
+        // here would leave a stale value if the server rejects the move.
         Ok(())
     }
 
