@@ -17,6 +17,7 @@
 - FFI 新增 `tslib_client_wait_connected`、`tslib_client_pump`、文本/状态回调注册。
 - Java `Client` 新增 `waitEvents/sendPoke/getNetworkStats/updateServerVariables/setWhisperTargets/setAudioSink` 与 `AudioSink` 接口。
 - Java `Identity` 新增 `exportTeamSpeakIni`；`OpusCodec` 新增 `decodePlc/setBitrate/setFec/setExpectedPacketLoss`。
+- 新增 Java `EchoCanceller`（AEC3）。
 
 ### Changed
 
