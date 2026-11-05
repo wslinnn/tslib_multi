@@ -1,6 +1,6 @@
 //! High-level audio manager
 
-use crate::capture::{CaptureDevice, VoiceActivityDetector};
+use crate::capture::{CaptureDevice, SampleBufferPool, VoiceActivityDetector};
 use crate::codec::{Decoder, Encoder, OpusCodec, OpusDecoder, OpusEncoder};
 use crate::config::{AudioConfig, DecoderPoolConfig};
 use crate::error::{AudioError, Result};
@@ -77,9 +77,13 @@ impl AudioManager {
     pub async fn start_capture(&self) -> Result<mpsc::Receiver<EncodedPacket>> {
         let (packet_tx, packet_rx) = mpsc::channel(32);
         let (frame_tx, mut frame_rx) = mpsc::channel(32);
+        let sample_pool = SampleBufferPool::default();
 
-        // Start capture device
-        self.capture.lock().await.start(frame_tx)?;
+        // Start capture device, recycling frame buffers through the pool.
+        self.capture
+            .lock()
+            .await
+            .start_with_pool(frame_tx, sample_pool.clone())?;
         *self.is_capturing.write().await = true;
 
         // Spawn encoding task
@@ -95,17 +99,24 @@ impl AudioManager {
             while *is_capturing.read().await {
                 match frame_rx.recv().await {
                     Some(frame) => {
+                        let samples = frame.samples;
+
                         // Check VAD
                         let voice_activity = if vad_enabled {
-                            vad.lock().await.process(&frame.samples)
+                            vad.lock().await.process(&samples)
                         } else {
                             true
                         };
 
                         // Only encode if voice detected (or VAD disabled)
                         if voice_activity {
-                            let mut enc = encoder.lock().await;
-                            match enc.encode(&frame.samples, &mut encode_buffer) {
+                            let encoded = {
+                                let mut enc = encoder.lock().await;
+                                enc.encode(&samples, &mut encode_buffer)
+                            };
+                            sample_pool.recycle(samples);
+
+                            match encoded {
                                 Ok(len) => {
                                     let packet = EncodedPacket {
                                         data: encode_buffer[..len].to_vec(),
@@ -120,6 +131,8 @@ impl AudioManager {
                                     tracing::warn!("Encoding error: {}", e);
                                 }
                             }
+                        } else {
+                            sample_pool.recycle(samples);
                         }
                     }
                     None => break,

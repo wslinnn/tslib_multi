@@ -62,6 +62,57 @@ pub struct AudioFrame {
     pub voice_activity: bool,
 }
 
+/// Reusable PCM frame buffers shared between the realtime capture callback
+/// and the encoder task.
+///
+/// The callback takes a buffer from the pool for each frame and the consumer
+/// returns it with [`SampleBufferPool::recycle`] after encoding, so
+/// steady-state capture does not allocate on the audio thread.
+#[derive(Clone)]
+pub struct SampleBufferPool {
+    buffers: Arc<Mutex<Vec<Vec<i16>>>>,
+    max_buffers: usize,
+}
+
+impl SampleBufferPool {
+    /// Create a pool that keeps at most `max_buffers` recycled buffers.
+    pub fn new(max_buffers: usize) -> Self {
+        Self {
+            buffers: Arc::new(Mutex::new(Vec::new())),
+            max_buffers: max_buffers.max(1),
+        }
+    }
+
+    /// Return an encoded frame buffer to the pool for reuse.
+    pub fn recycle(&self, buffer: Vec<i16>) {
+        if buffer.capacity() == 0 {
+            return;
+        }
+        let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
+        if buffers.len() < self.max_buffers {
+            buffers.push(buffer);
+        }
+    }
+
+    fn acquire(&self, len: usize) -> Vec<i16> {
+        let mut buffer = self
+            .buffers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .unwrap_or_default();
+        buffer.clear();
+        buffer.reserve(len);
+        buffer
+    }
+}
+
+impl Default for SampleBufferPool {
+    fn default() -> Self {
+        Self::new(8)
+    }
+}
+
 impl CaptureDevice {
     /// Create a new capture device
     pub fn new(config: AudioConfig) -> Result<Self> {
@@ -106,6 +157,19 @@ impl CaptureDevice {
 
     /// Start capturing audio
     pub fn start(&mut self, frame_tx: mpsc::Sender<AudioFrame>) -> Result<()> {
+        self.start_with_pool(frame_tx, SampleBufferPool::default())
+    }
+
+    /// Start capturing audio, reusing frame buffers from `pool`.
+    ///
+    /// The consumer is expected to call [`SampleBufferPool::recycle`] with
+    /// `AudioFrame::samples` once it no longer needs the frame. Without
+    /// recycling the capture thread falls back to one allocation per frame.
+    pub fn start_with_pool(
+        &mut self,
+        frame_tx: mpsc::Sender<AudioFrame>,
+        pool: SampleBufferPool,
+    ) -> Result<()> {
         if self.state.is_active.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -141,6 +205,7 @@ impl CaptureDevice {
         // Buffer to accumulate samples
         let buffer: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::with_capacity(frame_size * channels * 2)));
         let buffer_clone = buffer.clone();
+        let pool_clone = pool.clone();
 
         // Build the input stream
         let stream = device
@@ -155,23 +220,23 @@ impl CaptureDevice {
                     let vad_threshold = state.get_vad_threshold();
                     let vad_enabled = state.vad_enabled.load(Ordering::Relaxed);
 
-                    // Convert f32 to i16 and apply volume
-                    let samples: Vec<i16> = data
-                        .iter()
-                        .map(|&s| {
-                            let amplified = s * volume;
-                            (amplified.clamp(-1.0, 1.0) * 32767.0) as i16
-                        })
-                        .collect();
-
-                    // Add to buffer
-                    let mut buf = buffer_clone.lock().unwrap();
-                    buf.extend_from_slice(&samples);
+                    // Convert f32 to i16 and apply volume directly into the
+                    // accumulation buffer (no intermediate Vec).
+                    let mut buf = buffer_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    buf.reserve(data.len());
+                    buf.extend(data.iter().map(|&s| {
+                        let amplified = s * volume;
+                        (amplified.clamp(-1.0, 1.0) * 32767.0) as i16
+                    }));
 
                     // Check if we have enough for a frame
                     let samples_per_frame = frame_size * channels;
-                    while buf.len() >= samples_per_frame {
-                        let frame_samples: Vec<i16> = buf.drain(..samples_per_frame).collect();
+                    let mut consumed = 0;
+                    while buf.len() - consumed >= samples_per_frame {
+                        let mut frame_samples = pool_clone.acquire(samples_per_frame);
+                        frame_samples
+                            .extend_from_slice(&buf[consumed..consumed + samples_per_frame]);
+                        consumed += samples_per_frame;
 
                         // Calculate voice activity
                         let voice_activity = if vad_enabled {
@@ -191,8 +256,10 @@ impl CaptureDevice {
                         // Try to send, but don't block if receiver is full
                         if let Err(e) = frame_tx.try_send(frame) {
                             match e {
-                                mpsc::error::TrySendError::Full(_) => {
-                                    // Channel full, drop frame (acceptable for real-time audio)
+                                mpsc::error::TrySendError::Full(frame) => {
+                                    // Channel full, drop frame (acceptable for
+                                    // real-time audio) and keep its buffer.
+                                    pool_clone.recycle(frame.samples);
                                 }
                                 mpsc::error::TrySendError::Closed(_) => {
                                     // Channel closed, stop capturing
@@ -201,6 +268,12 @@ impl CaptureDevice {
                                 }
                             }
                         }
+                    }
+
+                    if consumed > 0 {
+                        let remaining = buf.len() - consumed;
+                        buf.copy_within(consumed.., 0);
+                        buf.truncate(remaining);
                     }
                 },
                 move |err| {
@@ -329,5 +402,39 @@ impl VoiceActivityDetector {
     /// Get current energy level
     pub fn energy(&self) -> f32 {
         self.current_energy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_pool_reuses_buffers() {
+        let pool = SampleBufferPool::new(2);
+        let buffer = pool.acquire(8);
+        assert!(buffer.capacity() >= 8);
+        pool.recycle(buffer);
+
+        let reused = pool.acquire(8);
+        assert!(reused.capacity() >= 8);
+
+        pool.recycle(vec![0i16; 8]);
+        pool.recycle(vec![0i16; 8]);
+        pool.recycle(vec![0i16; 8]);
+        assert_eq!(pool.buffers.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn sample_pool_ignores_empty_buffers() {
+        let pool = SampleBufferPool::new(4);
+        pool.recycle(Vec::new());
+        assert!(pool.buffers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn vad_detects_energy() {
+        assert!(!calculate_vad(&[0i16; 960], 0.3));
+        assert!(calculate_vad(&[10_000i16; 960], 0.3));
     }
 }

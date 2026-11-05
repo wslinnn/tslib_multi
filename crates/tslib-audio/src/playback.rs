@@ -122,6 +122,8 @@ impl PlaybackDevice {
         let mixer = self.mixer.clone();
         let state = self.state.clone();
         let _channels = self.config.channels as usize;
+        // Scratch buffer owned by the audio callback (allocated once).
+        let mut pcm_buffer: Vec<i16> = Vec::new();
 
         // Build the output stream
         let stream = device
@@ -138,12 +140,14 @@ impl PlaybackDevice {
 
                     let volume = state.get_volume();
 
-                    // Get samples from mixer
-                    let sample_count = data.len();
-                    let mut pcm_buffer = vec![0i16; sample_count];
+                    // Reuse the PCM scratch buffer across callbacks; only the
+                    // first callback (or a larger device buffer) allocates.
+                    if pcm_buffer.len() != data.len() {
+                        pcm_buffer.resize(data.len(), 0);
+                    }
 
                     {
-                        let mut mixer_guard = mixer.lock().unwrap();
+                        let mut mixer_guard = mixer.lock().unwrap_or_else(|e| e.into_inner());
                         mixer_guard.mix(&mut pcm_buffer);
                     }
 

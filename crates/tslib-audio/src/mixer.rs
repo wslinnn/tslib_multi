@@ -14,6 +14,8 @@ pub struct AudioMixer {
     /// Sample rate
     #[allow(dead_code)]
     sample_rate: u32,
+    /// Reused per-user read scratch space (avoids allocating per callback)
+    temp: Vec<i16>,
 }
 
 impl AudioMixer {
@@ -24,6 +26,7 @@ impl AudioMixer {
             master_volume: 1.0,
             buffer_capacity,
             sample_rate,
+            temp: Vec::new(),
         }
     }
 
@@ -44,16 +47,19 @@ impl AudioMixer {
             *sample = 0;
         }
 
-        // Temporary buffer for each user's contribution
-        let mut temp = vec![0i16; output.len()];
+        // Temporary buffer for each user's contribution, reused across
+        // callbacks so mixing does not allocate on the audio thread.
+        if self.temp.len() != output.len() {
+            self.temp.resize(output.len(), 0);
+        }
 
         // Mix all active users
         for buffer in self.user_buffers.values_mut() {
-            let samples_read = buffer.read(&mut temp);
+            let samples_read = buffer.read(&mut self.temp);
 
             // Add to output with saturation
             for i in 0..samples_read {
-                let mixed = output[i] as i32 + temp[i] as i32;
+                let mixed = output[i] as i32 + self.temp[i] as i32;
                 output[i] = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             }
         }

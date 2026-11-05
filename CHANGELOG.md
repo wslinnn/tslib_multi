@@ -21,6 +21,7 @@
 - `DecoderPoolConfig`（默认 5 分钟空闲淘汰、最多 512 个解码器）及 `AudioConfig.decoder_pool`。
 - `AudioManager::handle_event` / `handle_events`，把 `UserLeft` 映射为解码器与混音缓冲清理。
 - `AudioManager::evict_idle_decoders`、`AudioManager::decoder_count`，用于主动回收与诊断。
+- `SampleBufferPool` 与 `CaptureDevice::start_with_pool`，在采集回调与编码任务之间复用 PCM 帧缓冲。
 
 ### Changed
 
@@ -46,6 +47,7 @@
 - `User.is_talking` 随音频与 TalkStatus 维护。
 - 逐事件/逐文件/权限计算日志从 info 降到 debug，降低热路径开销。
 - 说话超时改为有序截止时间检查：无人说话时零扫描，有更新时为 O(log n)。
+- 采集回调不再创建中间 `Vec`，帧缓冲从池中复用；播放与混音的 PCM 临时缓冲跨回调复用，稳态回调不再逐帧分配。
 
 ### Fixed
 
