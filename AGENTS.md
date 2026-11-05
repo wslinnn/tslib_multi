@@ -105,16 +105,14 @@ arm64 与 x86_64 均已通过。
 - 变更摘要：`CHANGELOG.md`
 - 当前进度/剩余 backlog：`docs/handoff.md`；完整施工清单：`docs/construction-todo.md`（C1–C7）
 
-**已完成**：B1 全部；B2 大部分（Connected 单次、配置接线、非 Opus codec、Bot 事件泵、并发查询、移动状态、重连恢复、FFI 事件泵、Java 缺失 native/EchoCanceller、User/ServerInfo 字段、kick/ban/ChannelJoined、权限提示、is_talking、热路径日志）；B4 低风险项（解码器清理、说话超时 O(log n)、采集/播放/混音缓冲复用、音频事件 `Arc` 负载、音频回调 `try_lock`、音频计数、固定 60 ms jitter/PLC、共享用户/频道快照）；FR-SC-02 脱敏；FR-FS-06 上传落盘校验；Python 历史写入/实时 server info/事件负载；FR-BD-05 JNI JSON/日志；FR-ST-02/03/04/05（`MaxClientsKind`、`PermissionHints.known`、删子树/环检测、满员过滤）；`AudioReceived.seq`。
+**已完成**：B1/B2/B3 规格项；B4 低风险项；C1 正确性收尾（版本/初始静音/watchdog、target_id、User 时间字段、`users()/channels()` 返回 `Arc`）；C2 actor（命令结果、可靠控制事件、EventStream/Notification、Python/FFI/JNI 适配）；C3 路径式文件传输与 `ftstop/ftlist/ftgetfileinfo`；C4 重采样/设备协商/AEC/AGC/NS/解码器缓冲；C5 泵统计/基准/semver CI；C6 类型 ID、view/revision、管理命令、raw/组 whisper、头像图标、Identity SHA-256、ServerQuery crate、打包/fuzz。
 
-**未做/暂缓**：
+**未做/遗留（C7）**：
 
-1. 命令结果等待（actor，暂缓）
-2. 文件流式/续传、`ftstop/ftlist`
-3. 音频重采样/AEC 集成/设备格式协商（jitter/PLC 已完成）
-4. 性能 PR-01/06/07/11/12/14/16（PR-02/03/04 增量/08/09/10/13 已完成）
-5. Python 长期专用线程/GIL 方案
-6. ServerQuery/Streams/命令层/头像图标/完整 view 等 P2
-7. 真实服务器/真机、性能基线、CI semver 门禁、Java 测试
+1. 真实 TS3/TS6 服务器集成测试（文件续传/上传校验/权限/语音/重连）
+2. Android 真机音频/AEC/功耗/30 分钟通话、端到端 p95
+3. 真实连接 p99 与设备回调 dhat/Perfetto 数据
+4. Java JUnit/仪器测试；发布脚本实际产物验证
+5. 已知边界：时钟漂移仅观测、ServerQuery 仅 TCP、TS6 Streams 仅可行性评估
 
-**下一批建议**：绑定层使用快照、重采样/AEC/设备格式、PR-06/07 事件总线、PR-11 解码器分片。
+**下一批建议**：C7 验证。

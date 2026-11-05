@@ -1,8 +1,9 @@
 # 交接 / 当前进度（Handoff）
 
 > 最后更新：2026-11-05  
-> 当前 HEAD：`384460b feat(audio): 固定 60ms jitter buffer 与序号 PLC`  
+> 当前 HEAD：`fa83b5c feat(core): 补充 C6 字段更新、图标 id 与打包脚本`  
 > 工作区：干净  
+> 施工清单：`docs/construction-todo.md`（C1–C6 已完成，C7 验证遗留）  
 > 持久规范：`AGENTS.md`；需求：`docs/spec-error-fixes-performance.md`；API 差异：`docs/api-changes/v0.2.0.md`
 
 ---
@@ -52,10 +53,17 @@
 | `1cf4054` | PR-04（增量）`users_snapshot`/`channels_snapshot` 共享快照 |
 | `8483907` | `AudioReceived` 暴露 `seq`，供下游检测丢帧/PLC |
 | `384460b` | FR-AU-03/04 固定 60 ms jitter buffer、迟到丢弃、gap PLC |
+| `12d5ef2` | C1 正确性收尾：配置版本/初始静音/watchdog、TextMessage.target_id、User 时间字段、users/channels Arc |
+| `9168f09` | C2 actor：ActorHandle/EventStream、命令结果、Notification、Python/FFI/JNI 适配 |
+| `337e990` | C3 路径式文件传输、ftstop/ftlist/ftgetinfo、路径/文件事件 |
+| `a0df054` | C4 重采样/设备协商、AEC、AGC/NS、解码器缓冲复用、播放缓冲 40 ms |
+| `5ce6f28` | C5 泵统计、队列深度、基准与 semver CI |
+| `b3df50f` | C6 类型 ID、视图/revision、管理命令、raw/组 whisper、ServerQuery、打包/fuzz |
+| `fa83b5c` | C6 补充 FieldUpdate、CRC32 图标 id、打包脚本 |
 
 ### 验证
 
-- `tslib-core` 80 passed；`tslib-bot` 30；`tslib-audio` 46；`tslib-channel` 47；`tslib-chat` 116。
+- `tslib-core` 92 passed；`tslib-bot` 30；`tslib-audio` 56；`tslib-channel` 47；`tslib-chat` 116；`tslib-serverquery` 3 + 1 doc。
 - 合并测试用 `-j 1` 通过（默认并行偶发 rustc 崩溃）。
 - `cargo check -p tslib-ffi -p tslib-python -p test-suite` 通过。
 - Host JNI：`cargo check/build -p tslib-jni` 通过；`dumpbin` 确认符号。
@@ -79,26 +87,37 @@
 | 频道容量 | `MaxClientsKind` 区分 Unlimited/Inherited/Limited/Unknown；`Inherited` 沿父链解析 |
 | 权限未知 | 查询失败 `known=false`、`bits=0`，不再回退 `JOIN` |
 | 频道删除 | `remove_channel` 删除整棵子树，与服务器一致 |
-| 用户/频道读取 | 新增共享 `Arc` 快照；旧 `users()`/`channels()` 保留 `Vec` 返回 |
-| 音频事件 | `AudioReceived` 携带 `seq`，jitter/PLC 由上层或后续 AudioManager 接入实现 |
+| 用户/频道读取 | `users()`/`channels()` 返回共享 `Arc<[T]>`；事件泵/状态变更后重建 |
+| 音频事件 | `AudioReceived` 携带 `seq`；`process_incoming_with_seq` + `pump_jitter` 接入固定 jitter/PLC |
 | `max_memory_download` | 默认 **64 MiB**；超出报 `FileTransferFailed`，不截断 |
-| 初始静音 | 默认 **true**（隐私安全），暂未做成 `ClientConfig` 字段 |
-| 组 whisper | 本轮不做 |
-| 命令结果等待 | 暂缓，需 actor/独立事件泵 |
+| 初始静音 | `ClientConfig.initial_input_muted`，默认 **true** |
+| 组 whisper | `send_audio_to_group` 构造 `C2SWhisperNew`（target/whisper_type 由协议/服务器决定） |
+| 命令结果等待 | `ActorHandle::execute` + 命令便捷方法，带超时；旧 fire-and-forget API 保留 |
 | Go/No-Go | 高风险项先设计/拍板，不默认丢弃 |
 
 ---
 
-## 3. 施工 backlog
+## 3. 施工状态
 
-完整施工清单见 [`docs/construction-todo.md`](construction-todo.md)（C1–C7），已拍板：
+完整施工清单见 [`docs/construction-todo.md`](construction-todo.md)。
 
-- `users()` / `channels()` 改为返回 `Arc<[User]>` / `Arc<[Channel]>`（允许破坏，需写迁移文档）。
-- 命令与事件采用分阶段 actor。
-- FR-FS-03 采用路径式 `download_file_to_path` / `upload_file_from_path`。
-- 下一批：**C1 正确性收尾**（FR-CN-03 剩余、FR-EV-02/03、PR-04 返回类型、绑定适配、FR-ST-05 旧接口、L2 watchdog）。
+- **C1–C6：已完成**（正确性收尾、actor/命令/事件、路径式文件、音频硬化、性能/CI、P2 能力）。
+- **C7：验证遗留**
 
-后续批次：C2 actor/命令/事件、C3 文件流式、C4 音频硬化、C5 性能与 CI、C6 P2 能力、C7 验证。
+### C7 剩余
+
+- 真实 TS3/TS6 服务器集成测试（文件续传、上传校验、权限、语音、重连）。
+- Android 真机音频/AEC/功耗/30 分钟通话；端到端 p95 延迟。
+- `docs/perf-baseline.md` 补真实连接 p99 与设备回调分配数据。
+- Java JUnit/仪器测试。
+- `scripts/package.sh` 在 CI/发布机上的实际产物验证。
+
+### 已知实现边界（非阻塞）
+
+- C4-7 时钟漂移：已提供 `PlaybackStats.underruns` 观测与 `restart_*` 钩子，未做自适应重采样。
+- C6-9 ServerQuery：实现 TCP 文本协议；SSH/WebQuery 传输未实现。
+- C6-10 TS6 Streams：仅可行性评估（`docs/streams-feasibility.md`），未实现。
+- 采集/播放设备回调的 0 分配仅由 mixer/事件基准与代码审查支持，待真机 dhat/Perfetto 复核。
 
 ---
 

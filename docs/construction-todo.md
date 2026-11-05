@@ -144,6 +144,7 @@
 - [x] **C4-7 时钟漂移**
   - 长期通话中设备时钟与 48 kHz 基准漂移处理（丢/补帧策略）。
   - 验收：30 分钟通话 underrun/overflow 可控。
+  - 实现边界：提供 `PlaybackStats.underruns` 观测与 `restart_capture/playback` 钩子；自适应重采样未做，真机 30 分钟数据在 C7 补。
 
 - [x] **C4-8 Android 音频路由钩子**
   - audio focus、蓝牙/有线切换、网络切换的接口与文档（SDK 提供钩子，App 侧实现）。
@@ -190,7 +191,9 @@
 - [x] **C6-7 `exec_raw`**（原始命令发送）
 - [x] **C6-8 组 whisper**：先做可行性 spike（公开 `C2SWhisperNew`/`send_audio` 能否构造）；若必须改 D 则移入“不做”
 - [x] **C6-9 ServerQuery crate**（TCP/SSH/WebQuery，独立 crate）
+  - 实现边界：TCP 文本协议（connect/login/execute/quit）已完成；SSH/WebQuery 传输未实现。
 - [x] **C6-10 TS6 Streams crate**（屏幕共享信令；独立 crate，先做协议可行性评估）
+  - 实现边界：完成可行性评估（`docs/streams-feasibility.md`），未实现 crate；若产品要求需先做协议 spike。
 - [x] **C6-11 trace/diagnostics/指标导出**
 - [x] **C6-12 打包**：AAR、wheel、C header、版本号与发布流程
 - [x] **C6-13 fuzz 与协议实测文档**
