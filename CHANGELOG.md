@@ -32,6 +32,8 @@
 - 文件列表/权限查询按 `return_code` 关联，支持并发；同一频道/路径重复请求返回 `InvalidArgument`。
 - `move_to_channel` 不再发送后立即写 `channel_id`，只在服务器确认后更新。
 - 重连后重订阅频道、同步状态、恢复静音，并清空失效的 whisper 目标。
+- `User.country/description/idle_time/connected_time` 映射依赖层已有字段。
+- `ServerInfo.uid` 按服务器版本计算 SHA-1/SHA-256，banner 字段同步映射。
 
 ### Fixed
 
