@@ -31,3 +31,11 @@ cc = "1"
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+
+[[bench]]
+name = "jitter"
+harness = false
+
+[[bench]]
+name = "allocations"
+harness = false

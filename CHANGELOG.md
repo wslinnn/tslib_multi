@@ -55,6 +55,10 @@
 - AGC/NS 接线：高通的噪声抑制与平滑 AGC 在采集帧上生效。
 - `AudioManager::restart_capture/restart_playback`，供 Android 路由切换使用。
 - `PlaybackStats.underruns`（mixer 空缓冲次数）与 `AudioStats` 汇总。
+- `Client::pump_stats`（事件泵次数/事件数/耗时/最大耗时）与 `PumpStats`。
+- `ActorEventStream::pending_control_events` / `pending_voice_events`，用于队列深度观测。
+- 基准：`benches/tree.rs`、`benches/jitter.rs`、`benches/allocations.rs`；`docs/perf-baseline.md`。
+- CI 新增 `cargo-semver-checks` API 兼容性检查（`.github/workflows/api.yml`）。
 
 ### Changed
 

@@ -42,8 +42,7 @@ pub struct FileEntry {
 
 /// A snapshot of connection quality metrics from the underlying UDP layer.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NetworkStats {
-    /// Smoothed round trip time in milliseconds.
+pub struct NetworkStats {    /// Smoothed round trip time in milliseconds.
     pub rtt_ms: f64,
     /// Round trip time deviation in milliseconds.
     pub rtt_dev_ms: f64,
@@ -60,6 +59,19 @@ pub struct NetworkStats {
     /// as `packet_loss`, so clients can derive recent-window loss by
     /// differencing (`Δlost = loss·observed − prev_loss·prev_observed`).
     pub loss_observed_total: u64,
+}
+
+/// Timing counters for the event pump (PR-01 baseline).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PumpStats {
+    /// Number of completed pump calls.
+    pub pumps: u64,
+    /// Events returned by the last pump.
+    pub last_events: usize,
+    /// Duration of the last pump in microseconds.
+    pub last_duration_us: u64,
+    /// Longest pump duration observed in microseconds.
+    pub max_duration_us: u64,
 }
 
 /// The main TeamSpeak client
@@ -426,6 +438,8 @@ pub struct Client {
     reconnect_started: Option<Instant>,
     /// Whether `ConnectionStalled` was already emitted for this disconnect
     reconnect_stalled_reported: bool,
+    /// Event-pump timing counters
+    pump_stats: PumpStats,
 }
 
 impl Client {
@@ -464,6 +478,7 @@ impl Client {
             channels_snapshot: None,
             reconnect_started: None,
             reconnect_stalled_reported: false,
+            pump_stats: PumpStats::default(),
         };
 
         // Establish connection
@@ -527,6 +542,7 @@ impl Client {
         if self.connection.is_none() {
             return Err(ConnectionError::NotConnected.into());
         }
+        let pump_started = Instant::now();
         let mut events = Vec::new();
         let mut stream_items: Vec<StreamItem> = self.pending_stream_items.drain(..).collect();
         let mut disconnected = false;
@@ -601,6 +617,7 @@ impl Client {
         }
 
         self.invalidate_snapshots();
+        self.record_pump(pump_started, events.len());
         Ok(events)
     }
 
@@ -614,6 +631,7 @@ impl Client {
         if self.connection.is_none() {
             return Err(ConnectionError::NotConnected.into());
         }
+        let pump_started = Instant::now();
         let mut events = Vec::new();
         let mut stream_items: Vec<StreamItem> = self.pending_stream_items.drain(..).collect();
         let mut disconnected = false;
@@ -683,11 +701,24 @@ impl Client {
         }
 
         self.invalidate_snapshots();
+        self.record_pump(pump_started, events.len());
         Ok(events)
     }
 
-    /// Register the low-latency audio sink. Pass `None` to restore the
-    /// default `AudioReceived` event delivery. The closure receives
+    fn record_pump(&mut self, started: Instant, event_count: usize) {
+        let duration_us = started.elapsed().as_micros() as u64;
+        self.pump_stats.pumps = self.pump_stats.pumps.saturating_add(1);
+        self.pump_stats.last_events = event_count;
+        self.pump_stats.last_duration_us = duration_us;
+        self.pump_stats.max_duration_us = self.pump_stats.max_duration_us.max(duration_us);
+    }
+
+    /// Timing counters for the event pump (PR-01 baseline).
+    pub fn pump_stats(&self) -> PumpStats {
+        self.pump_stats
+    }
+
+    /// Register the low-latency audio sink. Pass `None` to restore the    /// default `AudioReceived` event delivery. The closure receives
     /// `(sender_id, sender_packet_seq, data, is_whisper)`; the sequence is
     /// the sender's per-packet counter from the TS voice header, which
     /// receivers use to detect lost frames.
@@ -3352,6 +3383,16 @@ mod validation_tests {
     }
 
     #[test]
+    fn pump_stats_record_duration_and_events() {
+        let mut client = disconnected_client();
+        client.record_pump(Instant::now(), 3);
+        let stats = client.pump_stats();
+        assert_eq!(stats.pumps, 1);
+        assert_eq!(stats.last_events, 3);
+        assert!(stats.max_duration_us >= stats.last_duration_us);
+    }
+
+    #[test]
     fn reconnect_watchdog_fires_once() {
         let mut client = disconnected_client();
         client.state = ConnectionState::Reconnecting;
@@ -3487,6 +3528,7 @@ mod validation_tests {
             channels_snapshot: None,
             reconnect_started: None,
             reconnect_stalled_reported: false,
+            pump_stats: PumpStats::default(),
         }
     }
 

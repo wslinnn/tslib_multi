@@ -36,7 +36,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-type BoxedResult = Result<Box<dyn Any + Send>>;
 type Job = Box<dyn FnOnce(&mut Client) + Send>;
 
 enum ActorCommand {
@@ -175,6 +174,16 @@ impl ActorEventStream {
     /// Voice events dropped for this subscriber because it was too slow.
     pub fn dropped_voice_events(&self) -> u64 {
         self.dropped_voice
+    }
+
+    /// Queued control events (unbounded, never dropped).
+    pub fn pending_control_events(&self) -> usize {
+        self.control.len()
+    }
+
+    /// Queued voice events in the bounded broadcast ring.
+    pub fn pending_voice_events(&self) -> usize {
+        self.voice.len()
     }
 
     /// Number of live subscribers (including this one).

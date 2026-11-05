@@ -17,3 +17,7 @@ serde.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+
+[[bench]]
+name = "tree"
+harness = false
