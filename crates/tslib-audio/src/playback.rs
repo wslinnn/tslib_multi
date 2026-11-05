@@ -147,8 +147,13 @@ impl PlaybackDevice {
                     }
 
                     {
-                        let mut mixer_guard = mixer.lock().unwrap_or_else(|e| e.into_inner());
-                        mixer_guard.mix(&mut pcm_buffer);
+                        // The audio callback must not block on the mixer lock:
+                        // a stalled network/decoder thread would cause an
+                        // underrun. Output silence for this block instead.
+                        match mixer.try_lock() {
+                            Ok(mut mixer_guard) => mixer_guard.mix(&mut pcm_buffer),
+                            Err(_) => pcm_buffer.fill(0),
+                        }
                     }
 
                     // Convert i16 to f32 and apply volume

@@ -221,8 +221,12 @@ impl CaptureDevice {
                     let vad_enabled = state.vad_enabled.load(Ordering::Relaxed);
 
                     // Convert f32 to i16 and apply volume directly into the
-                    // accumulation buffer (no intermediate Vec).
-                    let mut buf = buffer_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    // accumulation buffer (no intermediate Vec). Never block
+                    // the realtime capture thread on this lock; a contended
+                    // callback is dropped rather than stalling the device.
+                    let Ok(mut buf) = buffer_clone.try_lock() else {
+                        return;
+                    };
                     buf.reserve(data.len());
                     buf.extend(data.iter().map(|&s| {
                         let amplified = s * volume;
