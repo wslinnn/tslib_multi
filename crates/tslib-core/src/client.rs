@@ -72,6 +72,42 @@ const EVENT_BURST_GRACE_MS: u64 = 3;
 /// Upper bound on stream items processed per wait_events call.
 const MAX_STREAM_BURST: usize = 16;
 
+/// Voice packet overhead: 2-byte voice id, 2-byte client id, 1-byte codec,
+/// and the 8-byte MAC.
+const AUDIO_PACKET_OVERHEAD: usize = 5 + 8;
+
+/// Maximum encoded voice payload that fits in one UDP packet.
+const MAX_AUDIO_PAYLOAD: usize = tsproto::MAX_UDP_PACKET_LENGTH - AUDIO_PACKET_OVERHEAD;
+
+/// Protocol limits for direct whispers.
+const MAX_WHISPER_CLIENTS: usize = 32;
+const MAX_WHISPER_CHANNELS: usize = 255;
+
+fn validate_audio_payload(data_len: usize) -> Result<()> {
+    if data_len > MAX_AUDIO_PAYLOAD {
+        return Err(Error::InvalidArgument(format!(
+            "audio payload {data_len} exceeds {MAX_AUDIO_PAYLOAD} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_whisper_targets(clients: &[u16], channels: &[u64]) -> Result<()> {
+    if clients.len() > MAX_WHISPER_CLIENTS {
+        return Err(Error::InvalidArgument(format!(
+            "whisper clients {} exceeds {MAX_WHISPER_CLIENTS}",
+            clients.len()
+        )));
+    }
+    if channels.len() > MAX_WHISPER_CHANNELS {
+        return Err(Error::InvalidArgument(format!(
+            "whisper channels {} exceeds {MAX_WHISPER_CHANNELS}",
+            channels.len()
+        )));
+    }
+    Ok(())
+}
+
 pub struct Client {
     /// The tsclientlib connection
     connection: Option<TsConnection>,
@@ -1300,6 +1336,9 @@ impl Client {
 
     /// Send audio data
     pub fn send_audio(&mut self, data: &[u8], codec: AudioCodec) -> Result<()> {
+        validate_audio_payload(data.len())?;
+        validate_whisper_targets(&self.whisper_clients, &self.whisper_channels)?;
+
         let con = self
             .connection
             .as_mut()
@@ -1340,6 +1379,7 @@ impl Client {
     /// Targets are per-packet client/channel ids — resolve them from the
     /// current user list at call time, they don't follow reconnects.
     pub fn set_whisper_targets(&mut self, clients: Vec<u16>, channels: Vec<u64>) -> Result<()> {
+        validate_whisper_targets(&clients, &channels)?;
         self.whisper_clients = clients;
         self.whisper_channels = channels;
         if self.whisper_clients.is_empty() && self.whisper_channels.is_empty() {
@@ -1726,4 +1766,46 @@ fn compute_file_permission_hints(perms: &HashMap<u32, i32>) -> u64 {
 
     log::info!("compute_file_permission_hints: perms={:?} -> hints={:#x}", perms, hints);
     hints
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_audio_payload_at_limit() {
+        assert!(validate_audio_payload(MAX_AUDIO_PAYLOAD).is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_audio_payload() {
+        let err = validate_audio_payload(MAX_AUDIO_PAYLOAD + 1).unwrap_err();
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn accepts_whisper_targets_at_limits() {
+        let clients = vec![1; MAX_WHISPER_CLIENTS];
+        let channels = vec![1; MAX_WHISPER_CHANNELS];
+        assert!(validate_whisper_targets(&clients, &channels).is_ok());
+    }
+
+    #[test]
+    fn rejects_too_many_whisper_clients() {
+        let clients = vec![1; MAX_WHISPER_CLIENTS + 1];
+        let err = validate_whisper_targets(&clients, &[]).unwrap_err();
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn rejects_too_many_whisper_channels() {
+        let channels = vec![1; MAX_WHISPER_CHANNELS + 1];
+        let err = validate_whisper_targets(&[], &channels).unwrap_err();
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn allows_empty_whisper_targets_to_disable_whisper() {
+        assert!(validate_whisper_targets(&[], &[]).is_ok());
+    }
 }

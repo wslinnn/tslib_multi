@@ -32,6 +32,10 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// Invalid argument provided by the caller
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
     /// Timeout errors
     #[error("Operation timed out")]
     Timeout,
