@@ -1402,10 +1402,10 @@ impl Client {
                         if let Some(key) = return_code {
                             if let Some(pending) = self.pending_perm_overviews.remove(&key) {
                                 log::info!(
-                                    "permoverview failed for channel {}, defaulting to browse/download only",
+                                    "permoverview failed for channel {}, keeping join hint only",
                                     pending.channel_id
                                 );
-                                let hints = HINT_JOIN | HINT_FILE_BROWSE | HINT_FILE_DOWNLOAD;
+                                let hints = HINT_JOIN;
                                 if let Some(ch) =
                                     self.server_state.channels.get_mut(&pending.channel_id)
                                 {
@@ -2300,9 +2300,9 @@ fn compute_file_permission_hints(perms: &HashMap<u32, i32>) -> u64 {
         match perms.get(&power_id) {
             Some(&-1) => true, // unlimited (admin)
             Some(&power) => power >= perms.get(&needed_id).copied().unwrap_or(0),
-            // Power absent from permoverview = not explicitly restricted.
-            // Show the button; the server enforces the real check anyway.
-            None => true,
+            // Missing from permoverview means the server did not grant it;
+            // do not show a file action the user probably cannot perform.
+            None => false,
         }
     };
 
@@ -2422,6 +2422,63 @@ mod validation_tests {
         assert_eq!(user.id, 7);
         assert_eq!(user.nickname, "Kicker");
         assert!(user.uid.is_empty());
+    }
+
+    #[test]
+    fn missing_file_permissions_are_not_allowed() {
+        let hints = compute_file_permission_hints(&HashMap::new());
+        let file_bits = HINT_FILE_UPLOAD
+            | HINT_FILE_DOWNLOAD
+            | HINT_FILE_DELETE
+            | HINT_FILE_RENAME
+            | HINT_FILE_BROWSE
+            | HINT_FILE_DIRECTORY_CREATE;
+        assert_eq!(hints & file_bits, 0);
+    }
+
+    #[test]
+    fn unlimited_power_allows_file_permissions() {
+        let mut perms = HashMap::new();
+        for id in [
+            PERM_FT_FILE_UPLOAD_POWER,
+            PERM_FT_NEEDED_FILE_UPLOAD_POWER,
+            PERM_FT_FILE_DOWNLOAD_POWER,
+            PERM_FT_NEEDED_FILE_DOWNLOAD_POWER,
+            PERM_FT_FILE_DELETE_POWER,
+            PERM_FT_NEEDED_FILE_DELETE_POWER,
+            PERM_FT_FILE_RENAME_POWER,
+            PERM_FT_NEEDED_FILE_RENAME_POWER,
+            PERM_FT_FILE_BROWSE_POWER,
+            PERM_FT_NEEDED_FILE_BROWSE_POWER,
+            PERM_FT_DIRECTORY_CREATE_POWER,
+            PERM_FT_NEEDED_DIRECTORY_CREATE_POWER,
+        ] {
+            perms.insert(id, -1);
+        }
+        let hints = compute_file_permission_hints(&perms);
+        assert_ne!(hints & HINT_FILE_UPLOAD, 0);
+        assert_ne!(hints & HINT_FILE_DOWNLOAD, 0);
+        assert_ne!(hints & HINT_FILE_DELETE, 0);
+        assert_ne!(hints & HINT_FILE_RENAME, 0);
+        assert_ne!(hints & HINT_FILE_BROWSE, 0);
+        assert_ne!(hints & HINT_FILE_DIRECTORY_CREATE, 0);
+    }
+
+    #[test]
+    fn permission_power_must_meet_the_needed_power() {
+        let mut perms = HashMap::new();
+        perms.insert(PERM_FT_FILE_DOWNLOAD_POWER, 50);
+        perms.insert(PERM_FT_NEEDED_FILE_DOWNLOAD_POWER, 10);
+        assert_ne!(
+            compute_file_permission_hints(&perms) & HINT_FILE_DOWNLOAD,
+            0
+        );
+
+        perms.insert(PERM_FT_FILE_DOWNLOAD_POWER, 5);
+        assert_eq!(
+            compute_file_permission_hints(&perms) & HINT_FILE_DOWNLOAD,
+            0
+        );
     }
 
     fn disconnected_client() -> Client {
