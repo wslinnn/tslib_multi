@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::time::Duration;
 
 /// Client configuration builder
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientConfigBuilder {
     address: Option<String>,
     identity: Option<Identity>,
@@ -155,7 +155,7 @@ impl ClientConfigBuilder {
 }
 
 /// Client configuration
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ClientConfig {
     /// Server address (host:port)
     pub address: String,
@@ -279,6 +279,47 @@ mod hex {
     }
 }
 
+impl std::fmt::Debug for ClientConfigBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfigBuilder")
+            .field("address", &self.address)
+            .field("identity", &self.identity)
+            .field("nickname", &self.nickname)
+            .field("password", &redacted(&self.password))
+            .field("channel", &self.channel)
+            .field("channel_password", &redacted(&self.channel_password))
+            .field("hardware_id", &self.hardware_id)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("auto_reconnect", &self.auto_reconnect)
+            .field("reconnect_delay", &self.reconnect_delay)
+            .field("max_reconnect_attempts", &self.max_reconnect_attempts)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("address", &self.address)
+            .field("identity", &self.identity)
+            .field("nickname", &self.nickname)
+            .field("password", &redacted(&self.password))
+            .field("channel", &self.channel)
+            .field("channel_password", &redacted(&self.channel_password))
+            .field("hardware_id", &self.hardware_id)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("auto_reconnect", &self.auto_reconnect)
+            .field("reconnect_delay", &self.reconnect_delay)
+            .field("max_reconnect_attempts", &self.max_reconnect_attempts)
+            .finish()
+    }
+}
+
+/// Keep the presence of a secret visible while hiding its value.
+fn redacted(secret: &Option<String>) -> Option<&'static str> {
+    secret.as_ref().map(|_| "<redacted>")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +410,24 @@ mod tests {
         assert!(builder.auto_reconnect);
         assert_eq!(builder.reconnect_delay, Duration::from_secs(5));
         assert_eq!(builder.max_reconnect_attempts, 5);
+    }
+
+    #[test]
+    fn debug_redacts_passwords() {
+        let config = ClientConfigBuilder::default()
+            .address("localhost")
+            .identity(Identity::create().unwrap())
+            .password("server-secret")
+            .channel_password("channel-secret")
+            .build()
+            .unwrap();
+
+        let debug = format!("{:?}", config);
+        assert!(!debug.contains("server-secret"));
+        assert!(!debug.contains("channel-secret"));
+        assert!(debug.contains("<redacted>"));
+
+        let builder = ClientConfigBuilder::default().password("server-secret");
+        assert!(!format!("{:?}", builder).contains("server-secret"));
     }
 }

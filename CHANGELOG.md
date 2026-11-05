@@ -70,6 +70,7 @@
 
 - BBCode HTML 渲染对标签外文本和属性做 HTML 转义，拒绝 `javascript:`/`data:` 等显式 scheme，非法颜色/字号降级为纯文本。
 - 修复 `<script>`、`javascript:` 链接、`data:` 图片等 XSS 向量。
+- `ClientConfig`、`ClientConfigBuilder` 的 `Debug` 不再输出服务器密码/频道密码，改为 `<redacted>`。
 
 ### Migration
 
