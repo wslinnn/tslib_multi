@@ -24,6 +24,10 @@ pub enum AudioError {
     #[error("Codec error: {0}")]
     Codec(String),
 
+    /// Incoming codec is not supported by this decoder path
+    #[error("Unsupported audio codec: {0}")]
+    UnsupportedCodec(u8),
+
     /// Encoding error
     #[error("Encoding error: {0}")]
     Encode(String),

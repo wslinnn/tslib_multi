@@ -3,7 +3,7 @@
 use crate::capture::{CaptureDevice, VoiceActivityDetector};
 use crate::codec::{Decoder, Encoder, OpusCodec, OpusDecoder, OpusEncoder};
 use crate::config::AudioConfig;
-use crate::error::Result;
+use crate::error::{AudioError, Result};
 use crate::playback::PlaybackDevice;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -138,8 +138,10 @@ impl AudioManager {
         &self,
         user_id: u16,
         data: &[u8],
-        _codec: u8,
+        codec: u8,
     ) -> Result<()> {
+        ensure_opus_codec(codec)?;
+
         // Get or create decoder for this user
         let mut decoders = self.decoders.write().await;
         let decoder = decoders
@@ -206,5 +208,35 @@ impl AudioManager {
     /// Get current voice energy level
     pub async fn voice_energy(&self) -> f32 {
         self.vad.lock().await.energy()
+    }
+}
+
+/// Only Opus voice/music are decoded by `AudioManager`; other codecs must not
+/// be fed to the Opus decoder.
+fn ensure_opus_codec(codec: u8) -> Result<()> {
+    match tslib_core::AudioCodec::from_id(codec) {
+        Some(codec) if codec.is_opus() => Ok(()),
+        _ => Err(AudioError::UnsupportedCodec(codec)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_opus_codecs() {
+        assert!(ensure_opus_codec(4).is_ok());
+        assert!(ensure_opus_codec(5).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_opus_codecs() {
+        for codec in [0, 1, 2, 3, 6, 255] {
+            assert!(matches!(
+                ensure_opus_codec(codec),
+                Err(AudioError::UnsupportedCodec(value)) if value == codec
+            ));
+        }
     }
 }
