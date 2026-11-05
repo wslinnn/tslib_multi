@@ -14,7 +14,9 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
+use base64::Engine as _;
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tsclientlib::prelude::*;
 use tsclientlib::{Connection as TsConnection, DisconnectOptions, InMessage, PacketStat, Reason, StreamItem, ClientId, ChannelId};
@@ -119,6 +121,22 @@ fn validate_whisper_targets(clients: &[u16], channels: &[u64]) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Compute the server UID using the algorithm of its version family.
+fn server_uid(server: &tsclientlib::data::Server) -> String {
+    let major = server
+        .version
+        .split('.')
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    if major >= 6 {
+        let key = server.public_key.to_ts();
+        base64::engine::general_purpose::STANDARD.encode(Sha256::digest(key.as_bytes()))
+    } else {
+        server.public_key.get_uid()
+    }
 }
 
 /// Encode a channel password for file commands. Empty when absent.
@@ -1095,6 +1113,18 @@ impl Client {
         self.server_state.server.version = state.server.version.clone();
         self.server_state.server.max_clients = state.server.max_clients as u32;
         self.server_state.server.icon_id = state.server.icon.0 as i64;
+        self.server_state.server.uid = server_uid(&state.server);
+        self.server_state.server.host_banner_url = if state.server.hostbanner_url.is_empty() {
+            None
+        } else {
+            Some(state.server.hostbanner_url.clone())
+        };
+        self.server_state.server.host_banner_gfx_url =
+            if state.server.hostbanner_gfx_url.is_empty() {
+                None
+            } else {
+                Some(state.server.hostbanner_gfx_url.clone())
+            };
 
         // Sync all channels (preserve computed permission_hints)
         let old_hints: HashMap<u64, u64> = self.server_state.channels.iter()
@@ -1421,6 +1451,17 @@ impl Client {
                 info.version = server.version.clone();
                 info.max_clients = server.max_clients as u32;
                 info.icon_id = server.icon.0 as i64;
+                info.uid = server_uid(server);
+                info.host_banner_url = if server.hostbanner_url.is_empty() {
+                    None
+                } else {
+                    Some(server.hostbanner_url.clone())
+                };
+                info.host_banner_gfx_url = if server.hostbanner_gfx_url.is_empty() {
+                    None
+                } else {
+                    Some(server.hostbanner_gfx_url.clone())
+                };
                 if let Some(opt) = &server.optional_data {
                     info.clients_online = opt.client_count as u32;
                     info.channels_online = opt.channel_count as u32;
@@ -2060,12 +2101,29 @@ fn ts_client_to_user(client: &TsClient) -> User {
         channel_group: client.channel_group.0,
         platform: client.optional_data.as_ref().map(|o| o.platform.clone()).unwrap_or_default(),
         version: client.optional_data.as_ref().map(|o| o.version.clone()).unwrap_or_default(),
-        country: None, // Not directly available in tsclientlib
-        description: None,
+        country: if client.country_code.is_empty() {
+            None
+        } else {
+            Some(client.country_code.clone())
+        },
+        description: if client.description.is_empty() {
+            None
+        } else {
+            Some(client.description.clone())
+        },
         avatar_id: if client.avatar_hash.is_empty() { None } else { Some(client.avatar_hash.clone()) },
         icon_id: client.icon.0 as i64,
-        idle_time: 0,
-        connected_time: 0,
+        idle_time: client
+            .connection_data
+            .as_ref()
+            .map(|data| data.idle_time.whole_seconds().max(0) as u64)
+            .unwrap_or(0),
+        connected_time: client
+            .connection_data
+            .as_ref()
+            .and_then(|data| data.connected_time)
+            .map(|duration| duration.whole_seconds().max(0) as u64)
+            .unwrap_or(0),
     }
 }
 

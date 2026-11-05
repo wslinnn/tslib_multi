@@ -59,6 +59,7 @@ cbindgen = "0.26"
 # Crypto
 rand = "0.8"
 base64 = "0.21"
+sha2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
