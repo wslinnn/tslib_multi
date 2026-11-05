@@ -59,6 +59,15 @@
 - `ActorEventStream::pending_control_events` / `pending_voice_events`，用于队列深度观测。
 - 基准：`benches/tree.rs`、`benches/jitter.rs`、`benches/allocations.rs`；`docs/perf-baseline.md`。
 - CI 新增 `cargo-semver-checks` API 兼容性检查（`.github/workflows/api.yml`）。
+- 类型化 ID（`ClientId`/`ChannelId`/`DatabaseId`/`ServerGroupId`/`ChannelGroupId`/`PermissionId`/`IconId`）。
+- 管理命令封装：踢人/封禁/建删频道/编辑频道/组成员/频道与客户端权限。
+- `Client::send_raw_command`、`send_audio_to_group`（TS6 NEWPROTOCOL 组 whisper）。
+- `ServerView` + `view()`/`view_revision()` 与 `ViewReady`/`ViewChanged` 事件。
+- `ClientDiagnostics`/`diagnostics()`。
+- 头像/图标辅助：`upload_avatar`/`download_avatar`/`set_avatar_hash`/`icon_path`/`upload_icon`/`download_icon`。
+- `Identity::unique_id_sha256`、`MAX_UID_LEN`/`uid_fits_limit`。
+- 新 crate `tslib-serverquery`（TCP ServerQuery 登录/命令/退出）。
+- `docs/packaging.md`、`docs/protocol-behavior.md`、`docs/streams-feasibility.md`、`fuzz/` 骨架。
 
 ### Changed
 

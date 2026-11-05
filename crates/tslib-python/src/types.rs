@@ -443,6 +443,14 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             }
             let _ = dict.set_item("files", entries);
         }
+        Event::ViewReady { revision } => {
+            let _ = dict.set_item("type", "view_ready");
+            let _ = dict.set_item("revision", revision);
+        }
+        Event::ViewChanged { revision } => {
+            let _ = dict.set_item("type", "view_changed");
+            let _ = dict.set_item("revision", revision);
+        }
         Event::Notification { command } => {
             let _ = dict.set_item("type", "notification");
             let _ = dict.set_item("command", command);

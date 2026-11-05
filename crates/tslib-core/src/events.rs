@@ -123,6 +123,14 @@ pub enum Event {
         /// Protocol command name (for example `notifyclientchatcomposing`).
         command: String,
     },
+    /// Initial server view is ready (after the first state synchronization).
+    ViewReady {
+        revision: u64,
+    },
+    /// Users/channels/server state changed.
+    ViewChanged {
+        revision: u64,
+    },
     /// We were poked by someone
     Poked {
         poker_id: u16,

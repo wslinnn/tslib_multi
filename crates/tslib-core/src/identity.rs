@@ -202,6 +202,27 @@ impl Identity {
         self.inner.key().to_pub().get_uid()
     }
 
+    /// SHA-256 based unique id (`base64(sha256(ts-encoded public key))`).
+    ///
+    /// TS6 servers accept this longer-hash variant; TS3 servers expect
+    /// [`Self::unique_id`].
+    pub fn unique_id_sha256(&self) -> String {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+
+        let public = self.inner.key().to_pub();
+        let digest = Sha256::digest(public.to_ts().as_bytes());
+        base64::engine::general_purpose::STANDARD.encode(digest)
+    }
+
+    /// Maximum UID length accepted by TS3/TS6 (`160` characters).
+    pub const MAX_UID_LEN: usize = 160;
+
+    /// Whether a UID fits the protocol length limit.
+    pub fn uid_fits_limit(uid: &str) -> bool {
+        uid.len() <= Self::MAX_UID_LEN
+    }
+
     /// Get the current security level
     pub fn security_level(&self) -> u8 {
         self.inner.level()
@@ -402,5 +423,15 @@ mod tests {
         let loaded = Identity::from_string(&ini).unwrap();
         assert_eq!(identity.unique_id(), loaded.unique_id());
         assert_eq!(loaded.nickname().as_deref(), Some("tester"));
+    }
+
+    #[test]
+    fn sha256_uid_differs_and_fits_limit() {
+        let identity = Identity::create().unwrap();
+        let sha1 = identity.unique_id();
+        let sha256 = identity.unique_id_sha256();
+        assert_ne!(sha1, sha256);
+        assert!(Identity::uid_fits_limit(&sha1));
+        assert!(Identity::uid_fits_limit(&sha256));
     }
 }

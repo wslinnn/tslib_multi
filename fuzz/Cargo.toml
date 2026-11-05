@@ -1,0 +1,21 @@
+[package]
+name = "tslib-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tslib-chat = { path = "../crates/tslib-chat" }
+
+[[bin]]
+name = "bbcode"
+path = "fuzz_targets/bbcode.rs"
+test = false
+doc = false

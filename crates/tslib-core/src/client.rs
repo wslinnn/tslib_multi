@@ -7,6 +7,9 @@ use crate::config::{ClientConfig, FileTransferConfig};
 use crate::connection::ConnectionState;
 use crate::error::{ConnectionError, Error, Result};
 use crate::events::{AudioCodec, Event, EventHandler};
+use crate::ids::{ChannelId as TypedChannelId, ClientId as TypedClientId, DatabaseId,
+    PermissionId, ServerGroupId};
+use crate::permissions::*;
 use crate::state::{Channel, MaxClientsKind, PermissionHints, ServerInfo, ServerState, User};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::SeekFrom;
@@ -72,6 +75,30 @@ pub struct PumpStats {
     pub last_duration_us: u64,
     /// Longest pump duration observed in microseconds.
     pub max_duration_us: u64,
+}
+
+/// A revisioned snapshot of server, user and channel state.
+#[derive(Debug, Clone)]
+pub struct ServerView {
+    /// Monotonically increasing revision.
+    pub revision: u64,
+    /// Server information at this revision.
+    pub server: ServerInfo,
+    /// Users at this revision.
+    pub users: Arc<[User]>,
+    /// Channels at this revision.
+    pub channels: Arc<[Channel]>,
+}
+
+/// Lightweight diagnostics snapshot for embedding dashboards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientDiagnostics {
+    pub state: ConnectionState,
+    pub pump: PumpStats,
+    pub users: usize,
+    pub channels: usize,
+    pub pending_stream_items: usize,
+    pub view_revision: u64,
 }
 
 /// The main TeamSpeak client
@@ -440,6 +467,12 @@ pub struct Client {
     reconnect_stalled_reported: bool,
     /// Event-pump timing counters
     pump_stats: PumpStats,
+    /// Current view revision
+    view_revision: u64,
+    /// A state change has not been announced yet
+    view_dirty: bool,
+    /// The initial view-ready event is pending
+    view_ready_pending: bool,
 }
 
 impl Client {
@@ -479,6 +512,9 @@ impl Client {
             reconnect_started: None,
             reconnect_stalled_reported: false,
             pump_stats: PumpStats::default(),
+            view_revision: 0,
+            view_dirty: false,
+            view_ready_pending: false,
         };
 
         // Establish connection
@@ -616,8 +652,7 @@ impl Client {
             events.push(event);
         }
 
-        self.invalidate_snapshots();
-        self.record_pump(pump_started, events.len());
+        self.finish_pump(pump_started, &mut events);
         Ok(events)
     }
 
@@ -700,13 +735,30 @@ impl Client {
             events.push(event);
         }
 
-        self.invalidate_snapshots();
-        self.record_pump(pump_started, events.len());
+        self.finish_pump(pump_started, &mut events);
         Ok(events)
     }
 
-    fn record_pump(&mut self, started: Instant, event_count: usize) {
-        let duration_us = started.elapsed().as_micros() as u64;
+    fn finish_pump(&mut self, started: Instant, events: &mut Vec<Event>) {
+        if !events.is_empty() {
+            self.invalidate_snapshots();
+        }
+        if self.view_ready_pending {
+            events.push(Event::ViewReady {
+                revision: self.view_revision,
+            });
+            self.view_ready_pending = false;
+            self.view_dirty = false;
+        } else if self.view_dirty {
+            events.push(Event::ViewChanged {
+                revision: self.view_revision,
+            });
+            self.view_dirty = false;
+        }
+        self.record_pump(started, events.len());
+    }
+
+    fn record_pump(&mut self, started: Instant, event_count: usize) {        let duration_us = started.elapsed().as_micros() as u64;
         self.pump_stats.pumps = self.pump_stats.pumps.saturating_add(1);
         self.pump_stats.last_events = event_count;
         self.pump_stats.last_duration_us = duration_us;
@@ -907,6 +959,7 @@ impl Client {
 
         // Synchronize full state from server
         self.sync_state()?;
+        self.view_ready_pending = true;
 
         // Ask the server to push current variable values (client/channel
         // counts, uptime) via notifyserverupdated. Not critical — a failure
@@ -2121,6 +2174,41 @@ impl Client {
     fn invalidate_snapshots(&mut self) {
         self.users_snapshot = None;
         self.channels_snapshot = None;
+        self.view_revision = self.view_revision.wrapping_add(1);
+        self.view_dirty = true;
+    }
+
+    /// Revisioned snapshot of server, users and channels.
+    ///
+    /// `users`/`channels` are the same shared `Arc` snapshots returned by
+    /// [`Self::users`]/[`Self::channels`]; `revision` increases whenever the
+    /// cached state is invalidated.
+    pub fn view(&mut self) -> ServerView {
+        let users = self.users();
+        let channels = self.channels();
+        ServerView {
+            revision: self.view_revision,
+            server: self.server_info(),
+            users,
+            channels,
+        }
+    }
+
+    /// Current view revision without building a snapshot.
+    pub fn view_revision(&self) -> u64 {
+        self.view_revision
+    }
+
+    /// Lightweight diagnostics snapshot.
+    pub fn diagnostics(&self) -> ClientDiagnostics {
+        ClientDiagnostics {
+            state: self.state,
+            pump: self.pump_stats,
+            users: self.server_state.users.len(),
+            channels: self.server_state.channels.len(),
+            pending_stream_items: self.pending_stream_items.len(),
+            view_revision: self.view_revision,
+        }
     }
 
     /// Get all users directly from tsclientlib's connection state.
@@ -2341,6 +2429,185 @@ impl Client {
         Ok(())
     }
 
+    /// Send a raw command with raw string arguments.
+    ///
+    /// Intended for server features without a dedicated wrapper. Values are
+    /// escaped by the packet writer. This uses the fire-and-forget path; use
+    /// the actor's `execute` with a dedicated method when a result is needed.
+    pub fn send_raw_command(&mut self, command: &str, args: &[(&str, &str)]) -> Result<()> {
+        self.ensure_connected()?;
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or(ConnectionError::NotConnected)?;
+        let mut cmd = OutCommand::new(
+            Direction::C2S,
+            Flags::empty(),
+            PacketType::Command,
+            command,
+        );
+        for (name, value) in args {
+            cmd.write_arg(name, value);
+        }
+        cmd.send(con)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Kick a client from the channel or server (`clientkick`).
+    pub fn kick_client(
+        &mut self,
+        client: TypedClientId,
+        from_server: bool,
+        reason: &str,
+    ) -> Result<()> {
+        self.send_raw_command(
+            "clientkick",
+            &[
+                ("clid", &client.0.to_string()),
+                ("reasonid", if from_server { "5" } else { "4" }),
+                ("reasonmsg", reason),
+            ],
+        )
+    }
+
+    /// Ban a client for `duration_secs` seconds (`banclient`).
+    pub fn ban_client(
+        &mut self,
+        client: TypedClientId,
+        duration_secs: u64,
+        reason: &str,
+    ) -> Result<()> {
+        self.send_raw_command(
+            "banclient",
+            &[
+                ("clid", &client.0.to_string()),
+                ("time", &duration_secs.to_string()),
+                ("banreason", reason),
+            ],
+        )
+    }
+
+    /// Create a channel under `parent` (`channelcreate`).
+    pub fn create_channel(
+        &mut self,
+        name: &str,
+        parent: TypedChannelId,
+    ) -> Result<()> {
+        self.send_raw_command(
+            "channelcreate",
+            &[
+                ("channel_name", name),
+                ("cpid", &parent.0.to_string()),
+            ],
+        )
+    }
+
+    /// Delete a channel (`channeldelete`).
+    pub fn delete_channel(&mut self, channel: TypedChannelId, force: bool) -> Result<()> {
+        self.send_raw_command(
+            "channeldelete",
+            &[
+                ("cid", &channel.0.to_string()),
+                ("force", if force { "1" } else { "0" }),
+            ],
+        )
+    }
+
+    /// Edit channel name/topic/description (`channeledit`).
+    pub fn edit_channel(
+        &mut self,
+        channel: TypedChannelId,
+        name: Option<&str>,
+        topic: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let cid = channel.0.to_string();
+        let mut args: Vec<(&str, &str)> = vec![("cid", &cid)];
+        if let Some(value) = name {
+            args.push(("channel_name", value));
+        }
+        if let Some(value) = topic {
+            args.push(("channel_topic", value));
+        }
+        if let Some(value) = description {
+            args.push(("channel_description", value));
+        }
+        self.send_raw_command("channeledit", &args)
+    }
+
+    /// Add a database client to a server group (`servergroupaddclient`).
+    pub fn add_client_to_server_group(
+        &mut self,
+        client: DatabaseId,
+        group: ServerGroupId,
+    ) -> Result<()> {
+        self.send_raw_command(
+            "servergroupaddclient",
+            &[
+                ("cldbid", &client.0.to_string()),
+                ("sgid", &group.0.to_string()),
+            ],
+        )
+    }
+
+    /// Remove a database client from a server group (`servergroupdelclient`).
+    pub fn remove_client_from_server_group(
+        &mut self,
+        client: DatabaseId,
+        group: ServerGroupId,
+    ) -> Result<()> {
+        self.send_raw_command(
+            "servergroupdelclient",
+            &[
+                ("cldbid", &client.0.to_string()),
+                ("sgid", &group.0.to_string()),
+            ],
+        )
+    }
+
+    /// Set a channel permission value (`channeladdperm`).
+    pub fn set_channel_permission(
+        &mut self,
+        channel: TypedChannelId,
+        permission: PermissionId,
+        value: i32,
+        negated: bool,
+        skip: bool,
+    ) -> Result<()> {
+        self.send_raw_command(
+            "channeladdperm",
+            &[
+                ("cid", &channel.0.to_string()),
+                ("permid", &permission.0.to_string()),
+                ("permvalue", &value.to_string()),
+                ("permnegated", if negated { "1" } else { "0" }),
+                ("permskip", if skip { "1" } else { "0" }),
+            ],
+        )
+    }
+
+    /// Set a client permission value (`clientaddperm`).
+    pub fn set_client_permission(
+        &mut self,
+        client: DatabaseId,
+        permission: PermissionId,
+        value: i32,
+        negated: bool,
+        skip: bool,
+    ) -> Result<()> {
+        self.send_raw_command(
+            "clientaddperm",
+            &[
+                ("cldbid", &client.0.to_string()),
+                ("permid", &permission.0.to_string()),
+                ("permvalue", &value.to_string()),
+                ("permnegated", if negated { "1" } else { "0" }),
+                ("permskip", if skip { "1" } else { "0" }),
+            ],
+        )
+    }
+
     /// Send audio data
     pub fn send_audio(&mut self, data: &[u8], codec: AudioCodec) -> Result<()> {
         validate_audio_payload(data.len())?;
@@ -2398,6 +2665,45 @@ impl Client {
                 self.whisper_clients, self.whisper_channels
             );
         }
+        Ok(())
+    }
+
+    /// Send a voice packet using the TS6/NEWPROTOCOL group-whisper form.
+    ///
+    /// `target` and `whisper_type` are the protocol group identifiers; the
+    /// exact values are negotiated by the server/TS6 specification. The
+    /// packet is sent as-is, without the per-client/channel target list of
+    /// [`Self::set_whisper_targets`].
+    pub fn send_audio_to_group(
+        &mut self,
+        target: u8,
+        target_id: u64,
+        whisper_type: u8,
+        data: &[u8],
+        codec: AudioCodec,
+    ) -> Result<()> {
+        self.ensure_connected()?;
+        validate_audio_payload(data.len())?;
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or(ConnectionError::NotConnected)?;
+        if !con.can_send_audio() {
+            return Err(Error::Internal("Cannot send audio".to_string()));
+        }
+
+        let audio_data = AudioData::C2SWhisperNew {
+            id: self.audio_sequence,
+            codec: audio_codec_to_codec_type(codec),
+            whisper_type,
+            target,
+            target_id,
+            data,
+        };
+        self.audio_sequence = self.audio_sequence.wrapping_add(1);
+        let packet = OutAudio::new(&audio_data);
+        con.send_audio(packet)
+            .map_err(|e| Error::Internal(e.to_string()))?;
         Ok(())
     }
 
@@ -2640,11 +2946,61 @@ impl Client {
         }
     }
 
+    /// Server path used to upload our avatar.
+    pub const AVATAR_UPLOAD_PATH: &'static str = "/avatar";
+
+    /// Server path used to download another client's avatar.
+    pub fn avatar_download_path(avatar_hash: &str) -> String {
+        format!("/avatar_{avatar_hash}")
+    }
+
+    /// Upload our avatar bytes (TS3 server stores them under `/avatar`).
+    pub fn upload_avatar(&mut self, data: &[u8]) -> Result<()> {
+        self.upload_file(0, Self::AVATAR_UPLOAD_PATH, data, true)
+    }
+
+    /// Download a client avatar by its `User.avatar_id` hash.
+    pub fn download_avatar(&mut self, avatar_hash: &str) -> Result<()> {
+        self.download_file(0, &Self::avatar_download_path(avatar_hash))
+    }
+
+    /// Advertise our avatar hash with `clientupdate`.
+    pub fn set_avatar_hash(&mut self, avatar_hash: &str) -> Result<()> {
+        self.send_raw_command(
+            "clientupdate",
+            &[("client_flag_avatar", avatar_hash)],
+        )
+    }
+
+    /// Delete our uploaded avatar.
+    pub fn delete_avatar(&mut self) -> Result<()> {
+        self.delete_file(0, Self::AVATAR_UPLOAD_PATH)
+    }
+
+    /// Server path for an icon id (`/icon_<crc32>`).
+    pub fn icon_path(icon_id: i64) -> String {
+        format!("/icon_{icon_id}")
+    }
+
+    /// Upload an icon file to the server.
+    pub fn upload_icon(&mut self, file_name: &str, data: &[u8]) -> Result<()> {
+        self.upload_file(0, file_name, data, true)
+    }
+
+    /// Download an icon file from the server.
+    pub fn download_icon(&mut self, file_name: &str) -> Result<()> {
+        self.download_file(0, file_name)
+    }
+
+    /// Delete an icon file from the server.
+    pub fn delete_icon(&mut self, file_name: &str) -> Result<()> {
+        self.delete_file(0, file_name)
+    }
+
     /// Request metadata for one file on the server.
     ///
     /// The result arrives as `Event::FileInfoReceived`.
-    pub fn get_file_info(&mut self, channel_id: u64, path: &str) -> Result<()> {
-        self.ensure_connected()?;
+    pub fn get_file_info(&mut self, channel_id: u64, path: &str) -> Result<()> {        self.ensure_connected()?;
         let con = self
             .connection
             .as_mut()
@@ -3137,27 +3493,8 @@ fn ts_codec_to_u8(codec: TsCodec) -> u8 {
 }
 
 /// Permission IDs for file operations (from Permissions.csv, 0-indexed from line 2)
-const PERM_FT_FILE_UPLOAD_POWER: u32 = 235;
-const PERM_FT_NEEDED_FILE_UPLOAD_POWER: u32 = 236;
-const PERM_FT_FILE_DOWNLOAD_POWER: u32 = 237;
-const PERM_FT_NEEDED_FILE_DOWNLOAD_POWER: u32 = 238;
-const PERM_FT_FILE_DELETE_POWER: u32 = 239;
-const PERM_FT_NEEDED_FILE_DELETE_POWER: u32 = 240;
-const PERM_FT_FILE_RENAME_POWER: u32 = 241;
-const PERM_FT_NEEDED_FILE_RENAME_POWER: u32 = 242;
-const PERM_FT_FILE_BROWSE_POWER: u32 = 243;
-const PERM_FT_NEEDED_FILE_BROWSE_POWER: u32 = 244;
-const PERM_FT_DIRECTORY_CREATE_POWER: u32 = 245;
-const PERM_FT_NEEDED_DIRECTORY_CREATE_POWER: u32 = 246;
-
 /// ChannelPermissionHint bitflags (matches Enums.toml / Channel.java constants)
-const HINT_JOIN: u64 = 1;
-const HINT_FILE_UPLOAD: u64 = 64;
-const HINT_FILE_DOWNLOAD: u64 = 128;
-const HINT_FILE_DELETE: u64 = 256;
-const HINT_FILE_RENAME: u64 = 512;
-const HINT_FILE_BROWSE: u64 = 1024;
-const HINT_FILE_DIRECTORY_CREATE: u64 = 2048;
+
 
 /// Compute ChannelPermissionHint bitflags from a permoverview result.
 /// For each file operation, the user can do it if their power >= the needed power.
@@ -3383,6 +3720,16 @@ mod validation_tests {
     }
 
     #[test]
+    fn view_revision_increments_on_state_change() {
+        let mut client = disconnected_client();
+        let before = client.view_revision();
+        client.invalidate_snapshots();
+        let view = client.view();
+        assert!(view.revision > before);
+        assert_eq!(view.revision, client.view_revision());
+    }
+
+    #[test]
     fn pump_stats_record_duration_and_events() {
         let mut client = disconnected_client();
         client.record_pump(Instant::now(), 3);
@@ -3529,6 +3876,9 @@ mod validation_tests {
             reconnect_started: None,
             reconnect_stalled_reported: false,
             pump_stats: PumpStats::default(),
+            view_revision: 0,
+            view_dirty: false,
+            view_ready_pending: false,
         }
     }
 

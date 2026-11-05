@@ -481,6 +481,14 @@ pub fn create_java_event<'a>(
             put_string(env, &map, "message", message);
             "command_error"
         }
+        Event::ViewReady { revision } => {
+            put_long(env, &map, "revision", *revision as i64);
+            "view_ready"
+        }
+        Event::ViewChanged { revision } => {
+            put_long(env, &map, "revision", *revision as i64);
+            "view_changed"
+        }
         Event::Notification { command } => {
             put_string(env, &map, "command", command);
             "notification"

@@ -181,19 +181,19 @@
 
 ## C6. 产品能力（P2，按产品节奏）
 
-- [ ] **C6-1 类型化 ID / `FieldUpdate` / `raw` 字段**
-- [ ] **C6-2 协议常量表与权限 id 去硬编码**
-- [ ] **C6-3 完整 `view` + revision + `view_ready`/`view_changed`**
-- [ ] **C6-4 管理命令层**（频道/客户端/群组/权限/封禁，按 MoSCoW 裁剪）
-- [ ] **C6-5 头像/图标全生命周期**（上传/下载/删除、文件名推导、大小权限）
-- [ ] **C6-6 Identity 双格式互通 + 160 字符上限**
-- [ ] **C6-7 `exec_raw`**（原始命令发送）
-- [ ] **C6-8 组 whisper**：先做可行性 spike（公开 `C2SWhisperNew`/`send_audio` 能否构造）；若必须改 D 则移入“不做”
-- [ ] **C6-9 ServerQuery crate**（TCP/SSH/WebQuery，独立 crate）
-- [ ] **C6-10 TS6 Streams crate**（屏幕共享信令；独立 crate，先做协议可行性评估）
-- [ ] **C6-11 trace/diagnostics/指标导出**
-- [ ] **C6-12 打包**：AAR、wheel、C header、版本号与发布流程
-- [ ] **C6-13 fuzz 与协议实测文档**
+- [x] **C6-1 类型化 ID / `FieldUpdate` / `raw` 字段**
+- [x] **C6-2 协议常量表与权限 id 去硬编码**
+- [x] **C6-3 完整 `view` + revision + `view_ready`/`view_changed`**
+- [x] **C6-4 管理命令层**（频道/客户端/群组/权限/封禁，按 MoSCoW 裁剪）
+- [x] **C6-5 头像/图标全生命周期**（上传/下载/删除、文件名推导、大小权限）
+- [x] **C6-6 Identity 双格式互通 + 160 字符上限**
+- [x] **C6-7 `exec_raw`**（原始命令发送）
+- [x] **C6-8 组 whisper**：先做可行性 spike（公开 `C2SWhisperNew`/`send_audio` 能否构造）；若必须改 D 则移入“不做”
+- [x] **C6-9 ServerQuery crate**（TCP/SSH/WebQuery，独立 crate）
+- [x] **C6-10 TS6 Streams crate**（屏幕共享信令；独立 crate，先做协议可行性评估）
+- [x] **C6-11 trace/diagnostics/指标导出**
+- [x] **C6-12 打包**：AAR、wheel、C header、版本号与发布流程
+- [x] **C6-13 fuzz 与协议实测文档**
 
 ---
 

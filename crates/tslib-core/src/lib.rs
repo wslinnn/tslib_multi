@@ -39,16 +39,24 @@ pub mod config;
 pub mod connection;
 pub mod error;
 pub mod events;
+pub mod ids;
 pub mod identity;
+pub mod permissions;
 pub mod state;
 
 // Re-exports
 pub use actor::{ActorEventStream, ActorHandle};
-pub use client::{Client, FileEntry, NetworkStats};
+pub use client::{
+    Client, ClientDiagnostics, FileEntry, NetworkStats, PumpStats, ServerView,
+};
 pub use config::{ClientConfig, FileTransferConfig};
 pub use connection::{Connection, ConnectionState};
 pub use error::{Error, Result};
 pub use events::{AudioCodec, Event, EventHandler};
 pub use identity::Identity;
+pub use ids::{
+    ChannelGroupId, ChannelId, ClientId, DatabaseId, IconId, PermissionId, ServerGroupId,
+};
+pub use permissions::*;
 pub use state::{Channel, MaxClientsKind, PermissionHints, ServerState, User};
 pub use tsproto_types::versions::Version as ClientVersion;
