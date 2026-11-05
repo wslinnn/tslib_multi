@@ -8,8 +8,16 @@ on:
 
 jobs:
   semver:
-    name: cargo-semver-checks
+    name: cargo-semver-checks (${{ matrix.package }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - tslib-core
+          - tslib-audio
+          - tslib-chat
+          - tslib-channel
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,10 +27,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Compare the workspace against the merge base / previous commit so a
-      # breaking public API change fails the job and must be documented in
+      # audiopus/opus and speexdsp build through cmake; the newer runner cmake
+      # rejects the vendored projects' pre-3.5 minimum.
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+      # Compare each public library crate against the merge base / previous
+      # commit. A breaking API change fails the job and must be documented in
       # docs/api-changes/v<version>.md.
       - uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
+          package: ${{ matrix.package }}
           baseline-rev: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'HEAD^' }}
           verbose: true
