@@ -285,12 +285,8 @@ impl Client {
 
         info!("Connected to {}", self.config.address);
 
-        // Emit connected event
-        let _ = self.event_tx.send(Event::Connected {
-            server_name: String::new(), // Will be updated from server data
-            welcome_message: None,
-        });
-
+        // The user-visible `Connected` event is emitted by `wait_connected`
+        // after the server's initial state has been synchronized.
         Ok(())
     }
 
