@@ -19,7 +19,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 
-use tslib_core::{Client, ClientConfig, Identity};
+use tslib_core::{Client, ClientConfig, Event, Identity};
 
 /// Error codes
 #[repr(C)]
@@ -73,6 +73,15 @@ pub type ConnectionStateCallback = extern "C" fn(
     new_state: TsLibConnectionState,
     user_data: *mut c_void,
 );
+
+/// Internal FFI client: owns the connection and a runtime used to poll it.
+struct FfiClient {
+    client: Client,
+    runtime: tokio::runtime::Runtime,
+    text_callback: Option<TextMessageCallback>,
+    state_callback: Option<ConnectionStateCallback>,
+    user_data: *mut c_void,
+}
 
 // ============================================================================
 // Identity functions
@@ -240,7 +249,22 @@ pub unsafe extern "C" fn tslib_client_connect(
 
     // Client::connect is synchronous now
     match Client::connect(config) {
-        Ok(client) => Box::into_raw(Box::new(client)) as *mut TsLibClient,
+        Ok(client) => {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => return ptr::null_mut(),
+            };
+            Box::into_raw(Box::new(FfiClient {
+                client,
+                runtime,
+                text_callback: None,
+                state_callback: None,
+                user_data: ptr::null_mut(),
+            })) as *mut TsLibClient
+        }
         Err(_) => ptr::null_mut(),
     }
 }
@@ -255,7 +279,7 @@ pub unsafe extern "C" fn tslib_client_disconnect(client: *mut TsLibClient) -> Ts
         return TsLibError::InvalidArgument;
     }
 
-    let client = &mut *(client as *mut Client);
+    let client = &mut (*(client as *mut FfiClient)).client;
 
     match client.disconnect() {
         Ok(()) => TsLibError::Ok,
@@ -270,7 +294,7 @@ pub unsafe extern "C" fn tslib_client_state(client: *const TsLibClient) -> TsLib
         return TsLibConnectionState::Disconnected;
     }
 
-    let client = &*(client as *const Client);
+    let client = &(*(client as *const FfiClient)).client;
     let state = client.state();
 
     match state {
@@ -296,7 +320,7 @@ pub unsafe extern "C" fn tslib_client_send_server_message(
         return TsLibError::InvalidArgument;
     }
 
-    let client = &mut *(client as *mut Client);
+    let client = &mut (*(client as *mut FfiClient)).client;
     let message = match CStr::from_ptr(message).to_str() {
         Ok(s) => s,
         Err(_) => return TsLibError::InvalidArgument,
@@ -323,7 +347,7 @@ pub unsafe extern "C" fn tslib_client_send_private_message(
         return TsLibError::InvalidArgument;
     }
 
-    let client = &mut *(client as *mut Client);
+    let client = &mut (*(client as *mut FfiClient)).client;
     let message = match CStr::from_ptr(message).to_str() {
         Ok(s) => s,
         Err(_) => return TsLibError::InvalidArgument,
@@ -348,7 +372,7 @@ pub unsafe extern "C" fn tslib_client_move_to_channel(
         return TsLibError::InvalidArgument;
     }
 
-    let client = &mut *(client as *mut Client);
+    let client = &mut (*(client as *mut FfiClient)).client;
 
     match client.move_to_channel(channel_id) {
         Ok(()) => TsLibError::Ok,
@@ -356,11 +380,139 @@ pub unsafe extern "C" fn tslib_client_move_to_channel(
     }
 }
 
+/// Wait until the initial handshake and state sync are complete.
+#[no_mangle]
+pub unsafe extern "C" fn tslib_client_wait_connected(client: *mut TsLibClient) -> TsLibError {
+    if client.is_null() {
+        return TsLibError::InvalidArgument;
+    }
+
+    let handle = &mut *(client as *mut FfiClient);
+    let FfiClient { client, runtime, .. } = handle;
+    match runtime.block_on(client.wait_connected()) {
+        Ok(()) => TsLibError::Ok,
+        Err(_) => TsLibError::ConnectionFailed,
+    }
+}
+
+/// Install a callback for text messages. The callback runs on the thread
+/// calling `tslib_client_pump` and must not call back into the same client.
+#[no_mangle]
+pub unsafe extern "C" fn tslib_client_set_text_callback(
+    client: *mut TsLibClient,
+    callback: Option<TextMessageCallback>,
+    user_data: *mut c_void,
+) -> TsLibError {
+    if client.is_null() {
+        return TsLibError::InvalidArgument;
+    }
+
+    let handle = &mut *(client as *mut FfiClient);
+    handle.text_callback = callback;
+    handle.user_data = user_data;
+    TsLibError::Ok
+}
+
+/// Install a callback for connection state changes.
+#[no_mangle]
+pub unsafe extern "C" fn tslib_client_set_state_callback(
+    client: *mut TsLibClient,
+    callback: Option<ConnectionStateCallback>,
+    user_data: *mut c_void,
+) -> TsLibError {
+    if client.is_null() {
+        return TsLibError::InvalidArgument;
+    }
+
+    let handle = &mut *(client as *mut FfiClient);
+    handle.state_callback = callback;
+    handle.user_data = user_data;
+    TsLibError::Ok
+}
+
+/// Drive the connection and deliver queued events to the registered callbacks.
+///
+/// Returns the number of events delivered, or `-1` on error. This must be
+/// called repeatedly (for example from the application's main loop) so the
+/// connection can send/receive packets.
+#[no_mangle]
+pub unsafe extern "C" fn tslib_client_pump(
+    client: *mut TsLibClient,
+    timeout_ms: u32,
+) -> c_int {
+    if client.is_null() {
+        return -1;
+    }
+
+    let handle = &mut *(client as *mut FfiClient);
+    let FfiClient {
+        client,
+        runtime,
+        text_callback,
+        state_callback,
+        user_data,
+    } = handle;
+
+    let events = match runtime.block_on(client.wait_events(timeout_ms as u64)) {
+        Ok(events) => events,
+        Err(_) => return -1,
+    };
+
+    let count = events.len() as c_int;
+    for event in events {
+        match event {
+            Event::TextMessage {
+                sender_id,
+                sender_name,
+                message,
+                target,
+            } => {
+                if let Some(callback) = *text_callback {
+                    let name = CString::new(sender_name).unwrap_or_default();
+                    let message = CString::new(message).unwrap_or_default();
+                    let is_private = matches!(
+                        target,
+                        tslib_core::events::MessageTarget::Private
+                    ) as c_int;
+                    callback(
+                        sender_id,
+                        name.as_ptr(),
+                        message.as_ptr(),
+                        is_private,
+                        *user_data,
+                    );
+                }
+            }
+            Event::Connected { .. } | Event::Reconnected { .. } => {
+                if let Some(callback) = *state_callback {
+                    callback(
+                        TsLibConnectionState::Connecting,
+                        TsLibConnectionState::Connected,
+                        *user_data,
+                    );
+                }
+            }
+            Event::Disconnected { .. } | Event::ConnectionLost { .. } => {
+                if let Some(callback) = *state_callback {
+                    callback(
+                        TsLibConnectionState::Connected,
+                        TsLibConnectionState::Disconnected,
+                        *user_data,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    count
+}
+
 /// Free a client
 #[no_mangle]
 pub unsafe extern "C" fn tslib_client_free(client: *mut TsLibClient) {
     if !client.is_null() {
-        drop(Box::from_raw(client as *mut Client));
+        drop(Box::from_raw(client as *mut FfiClient));
     }
 }
 
