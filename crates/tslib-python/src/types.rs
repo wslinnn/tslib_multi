@@ -51,6 +51,8 @@ pub struct PyChannel {
     pub needed_talk_power: i32,
     pub icon_id: i64,
     pub is_subscribed: bool,
+    pub permission_hints: u64,
+    pub permission_hints_known: bool,
 }
 
 #[pymethods]
@@ -80,6 +82,8 @@ impl From<tslib_core::state::Channel> for PyChannel {
             needed_talk_power: c.needed_talk_power,
             icon_id: c.icon_id,
             is_subscribed: c.is_subscribed,
+            permission_hints: c.permission_hints,
+            permission_hints_known: c.permission_hints_known,
         }
     }
 }
@@ -366,10 +370,11 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             }
             let _ = dict.set_item("files", entries);
         }
-        Event::ChannelPermissionsUpdated { channel_id, permission_hints } => {
+        Event::ChannelPermissionsUpdated { channel_id, permission_hints, known } => {
             let _ = dict.set_item("type", "channel_permissions_updated");
             let _ = dict.set_item("channel_id", channel_id);
             let _ = dict.set_item("permission_hints", permission_hints);
+            let _ = dict.set_item("known", known);
         }
     }
 

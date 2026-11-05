@@ -148,6 +148,8 @@ pub enum Event {
     ChannelPermissionsUpdated {
         channel_id: u64,
         permission_hints: u64,
+        /// False when the query failed or the server provided no data.
+        known: bool,
     },
 }
 

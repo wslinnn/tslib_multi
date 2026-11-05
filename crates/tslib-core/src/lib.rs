@@ -48,4 +48,4 @@ pub use connection::{Connection, ConnectionState};
 pub use error::{Error, Result};
 pub use events::{AudioCodec, Event, EventHandler};
 pub use identity::Identity;
-pub use state::{Channel, MaxClientsKind, ServerState, User};
+pub use state::{Channel, MaxClientsKind, PermissionHints, ServerState, User};

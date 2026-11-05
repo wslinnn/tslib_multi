@@ -39,6 +39,7 @@ fn make_channel(id: u64, parent_id: u64, name: &str, order: u64) -> Channel {
         icon_id: 0,
         is_subscribed: true,
         permission_hints: 0,
+        permission_hints_known: false,
     }
 }
 

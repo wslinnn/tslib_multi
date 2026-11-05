@@ -271,6 +271,7 @@ impl ChannelBuilder {
             icon_id: 0,
             is_subscribed: false,
             permission_hints: 0,
+            permission_hints_known: false,
         })
     }
 }

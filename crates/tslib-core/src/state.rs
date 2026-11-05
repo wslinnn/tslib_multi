@@ -114,6 +114,32 @@ pub enum MaxClientsKind {
     Unknown,
 }
 
+/// Computed channel permission hints plus whether the query succeeded.
+///
+/// `bits == 0, known == false` means the server did not provide permission
+/// data (or the query failed); callers should show "unknown" rather than
+/// assuming the user is denied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionHints {
+    /// ChannelPermissionHint bitflags.
+    pub bits: u64,
+    /// True when the values came from a successful query.
+    pub known: bool,
+}
+
+impl PermissionHints {
+    /// Unknown hints (query failed or was never run).
+    pub const UNKNOWN: Self = Self {
+        bits: 0,
+        known: false,
+    };
+
+    /// Hints from a successful query.
+    pub fn known(bits: u64) -> Self {
+        Self { bits, known: true }
+    }
+}
+
 /// Channel information
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Channel {
@@ -159,6 +185,8 @@ pub struct Channel {
     /// FILE_UPLOAD=64, FILE_DOWNLOAD=128, FILE_DELETE=256,
     /// FILE_RENAME=512, FILE_BROWSE=1024, FILE_DIRECTORY_CREATE=2048
     pub permission_hints: u64,
+    /// True when `permission_hints` came from the server or a successful query
+    pub permission_hints_known: bool,
 }
 
 impl Channel {

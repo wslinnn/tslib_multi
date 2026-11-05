@@ -21,6 +21,11 @@ public class Channel {
     public final int neededTalkPower;
     public final long iconId;
     public final long permissionHints;
+    /**
+     * True when {@link #permissionHints} came from the server or a successful
+     * permoverview query. When false, zero bits mean "unknown", not "denied".
+     */
+    public final boolean permissionHintsKnown;
 
     // Permission hint bit flags
     public static final long PERM_FILE_UPLOAD = 64;
@@ -35,7 +40,8 @@ public class Channel {
                    boolean isSemiPermanent, boolean isDefault,
                    boolean hasPassword, byte codec, byte codecQuality,
                    int maxClients, int maxFamilyClients,
-                   int neededTalkPower, long iconId, long permissionHints) {
+                   int neededTalkPower, long iconId, long permissionHints,
+                   boolean permissionHintsKnown) {
         this.id = id;
         this.parentId = parentId;
         this.name = name;
@@ -53,6 +59,7 @@ public class Channel {
         this.neededTalkPower = neededTalkPower;
         this.iconId = iconId;
         this.permissionHints = permissionHints;
+        this.permissionHintsKnown = permissionHintsKnown;
     }
 
     public boolean canUploadFile() {

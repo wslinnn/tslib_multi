@@ -29,6 +29,8 @@
 - `MaxClientsKind`（`Unlimited`/`Inherited`/`Limited`/`Unknown`）与 `Channel.max_clients_kind`、`max_family_clients_kind`。
 - `ChannelTree::effective_max_clients` / `is_full`，沿父链解析 `Inherited` 上限。
 - `ChannelManager::joinable_channels_for_users` / `joinable_channels_with_occupancy`，按人数排除满员频道。
+- `PermissionHints { bits, known }` 与 `Channel.permission_hints_known`；Java `Channel.permissionHintsKnown`，Python `Channel.permission_hints(_known)`。
+- `Event::ChannelPermissionsUpdated` 新增 `known` 字段。
 
 ### Changed
 
@@ -59,6 +61,7 @@
 - 采集回调不再创建中间 `Vec`，帧缓冲从池中复用；播放与混音的 PCM 临时缓冲跨回调复用，稳态回调不再逐帧分配。
 - 采集/播放回调改用 `try_lock`：拿不到锁时丢弃本次采集或输出静音，实时线程不再等待网络/解码线程。
 - `Channel::is_full` 优先使用结构化上限；`max_clients` 保留原有 `-1` 语义。
+- 权限查询失败不再回退 `JOIN` 提示，改为 `known=false`、`bits=0`，调用方可区分“未知”和“拒绝”。
 
 ### Fixed
 

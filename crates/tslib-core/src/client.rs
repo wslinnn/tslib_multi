@@ -7,7 +7,7 @@ use crate::config::{ClientConfig, FileTransferConfig};
 use crate::connection::ConnectionState;
 use crate::error::{ConnectionError, Error, Result};
 use crate::events::{AudioCodec, Event, EventHandler};
-use crate::state::{Channel, MaxClientsKind, ServerInfo, ServerState, User};
+use crate::state::{Channel, MaxClientsKind, PermissionHints, ServerInfo, ServerState, User};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1401,15 +1401,17 @@ impl Client {
                 debug!(
                     "Channel {} permission_hints computed: {:#x} ({} perms)",
                     pending.channel_id,
-                    hints,
+                    hints.bits,
                     pending.perms.len()
                 );
                 if let Some(ch) = self.server_state.channels.get_mut(&pending.channel_id) {
-                    ch.permission_hints = hints;
+                    ch.permission_hints = hints.bits;
+                    ch.permission_hints_known = hints.known;
                 }
                 let event = Event::ChannelPermissionsUpdated {
                     channel_id: pending.channel_id,
-                    permission_hints: hints,
+                    permission_hints: hints.bits,
+                    known: hints.known,
                 };
                 let _ = self.event_tx.send(event.clone());
                 vec![event]
@@ -1512,24 +1514,26 @@ impl Client {
                         }
                     }
 
-                    // Failed permoverview: keep the legacy fallback hints, but
-                    // only resolve the request this error belongs to.
+                    // Failed permoverview: the result is unknown, not "denied".
+                    // Only resolve the request this error belongs to.
                     if error_id != 0 {
                         if let Some(key) = return_code {
                             if let Some(pending) = self.pending_perm_overviews.remove(&key) {
                                 debug!(
-                                    "permoverview failed for channel {}, keeping join hint only",
+                                    "permoverview failed for channel {}, hints unknown",
                                     pending.channel_id
                                 );
-                                let hints = HINT_JOIN;
+                                let hints = PermissionHints::UNKNOWN;
                                 if let Some(ch) =
                                     self.server_state.channels.get_mut(&pending.channel_id)
                                 {
-                                    ch.permission_hints = hints;
+                                    ch.permission_hints = hints.bits;
+                                    ch.permission_hints_known = hints.known;
                                 }
                                 let event = Event::ChannelPermissionsUpdated {
                                     channel_id: pending.channel_id,
-                                    permission_hints: hints,
+                                    permission_hints: hints.bits,
+                                    known: hints.known,
                                 };
                                 let _ = self.event_tx.send(event.clone());
                                 events.push(event);
@@ -2484,6 +2488,7 @@ fn ts_channel_to_channel(channel: &TsChannel) -> Channel {
             }
             hints
         },
+        permission_hints_known: channel.permission_hints.is_some(),
     }
 }
 
@@ -2525,7 +2530,10 @@ const HINT_FILE_DIRECTORY_CREATE: u64 = 2048;
 /// Compute ChannelPermissionHint bitflags from a permoverview result.
 /// For each file operation, the user can do it if their power >= the needed power.
 /// Permissions not present in the map default to 0.
-fn compute_file_permission_hints(perms: &HashMap<u32, i32>) -> u64 {
+///
+/// The returned hints are marked `known`: this is only called for a response
+/// that arrived, while a failed query uses [`PermissionHints::UNKNOWN`].
+fn compute_file_permission_hints(perms: &HashMap<u32, i32>) -> PermissionHints {
     let mut hints: u64 = HINT_JOIN; // If we're in the channel, we can join
 
     let can = |power_id: u32, needed_id: u32| -> bool {
@@ -2562,7 +2570,7 @@ fn compute_file_permission_hints(perms: &HashMap<u32, i32>) -> u64 {
         perms.len(),
         hints
     );
-    hints
+    PermissionHints::known(hints)
 }
 
 #[cfg(test)]
@@ -2669,7 +2677,14 @@ mod validation_tests {
             | HINT_FILE_RENAME
             | HINT_FILE_BROWSE
             | HINT_FILE_DIRECTORY_CREATE;
-        assert_eq!(hints & file_bits, 0);
+        assert_eq!(hints.bits & file_bits, 0);
+        assert!(hints.known);
+    }
+
+    #[test]
+    fn unknown_permission_hints_are_marked_unknown() {
+        assert_eq!(PermissionHints::UNKNOWN.bits, 0);
+        assert!(!PermissionHints::UNKNOWN.known);
     }
 
     #[test]
@@ -2692,12 +2707,12 @@ mod validation_tests {
             perms.insert(id, -1);
         }
         let hints = compute_file_permission_hints(&perms);
-        assert_ne!(hints & HINT_FILE_UPLOAD, 0);
-        assert_ne!(hints & HINT_FILE_DOWNLOAD, 0);
-        assert_ne!(hints & HINT_FILE_DELETE, 0);
-        assert_ne!(hints & HINT_FILE_RENAME, 0);
-        assert_ne!(hints & HINT_FILE_BROWSE, 0);
-        assert_ne!(hints & HINT_FILE_DIRECTORY_CREATE, 0);
+        assert_ne!(hints.bits & HINT_FILE_UPLOAD, 0);
+        assert_ne!(hints.bits & HINT_FILE_DOWNLOAD, 0);
+        assert_ne!(hints.bits & HINT_FILE_DELETE, 0);
+        assert_ne!(hints.bits & HINT_FILE_RENAME, 0);
+        assert_ne!(hints.bits & HINT_FILE_BROWSE, 0);
+        assert_ne!(hints.bits & HINT_FILE_DIRECTORY_CREATE, 0);
     }
 
     #[test]
@@ -2706,13 +2721,13 @@ mod validation_tests {
         perms.insert(PERM_FT_FILE_DOWNLOAD_POWER, 50);
         perms.insert(PERM_FT_NEEDED_FILE_DOWNLOAD_POWER, 10);
         assert_ne!(
-            compute_file_permission_hints(&perms) & HINT_FILE_DOWNLOAD,
+            compute_file_permission_hints(&perms).bits & HINT_FILE_DOWNLOAD,
             0
         );
 
         perms.insert(PERM_FT_FILE_DOWNLOAD_POWER, 5);
         assert_eq!(
-            compute_file_permission_hints(&perms) & HINT_FILE_DOWNLOAD,
+            compute_file_permission_hints(&perms).bits & HINT_FILE_DOWNLOAD,
             0
         );
     }

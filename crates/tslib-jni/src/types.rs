@@ -17,7 +17,7 @@ pub fn create_java_channel<'a>(env: &mut JNIEnv<'a>, ch: &Channel) -> JObject<'a
 
     env.new_object(
         "dev/tslib/Channel",
-        "(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;JZZZZBBIIIJJ)V",
+        "(JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;JZZZZBBIIIJJZ)V",
         &[
             JValue::Long(ch.id as i64),
             JValue::Long(ch.parent_id as i64),
@@ -36,6 +36,7 @@ pub fn create_java_channel<'a>(env: &mut JNIEnv<'a>, ch: &Channel) -> JObject<'a
             JValue::Int(ch.needed_talk_power),
             JValue::Long(ch.icon_id),
             JValue::Long(ch.permission_hints as i64),
+            JValue::Bool(ch.permission_hints_known as u8),
         ],
     )
     .unwrap_or_else(|_| JObject::null())
@@ -394,9 +395,10 @@ pub fn create_java_event<'a>(
             put_string(env, &map, "message", message);
             "command_error"
         }
-        Event::ChannelPermissionsUpdated { channel_id, permission_hints } => {
+        Event::ChannelPermissionsUpdated { channel_id, permission_hints, known } => {
             put_long(env, &map, "channel_id", *channel_id as i64);
             put_long(env, &map, "permission_hints", *permission_hints as i64);
+            put_boolean(env, &map, "known", *known);
             "channel_permissions_updated"
         }
     };
