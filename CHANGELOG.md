@@ -62,6 +62,8 @@
 - 采集/播放回调改用 `try_lock`：拿不到锁时丢弃本次采集或输出静音，实时线程不再等待网络/解码线程。
 - `Channel::is_full` 优先使用结构化上限；`max_clients` 保留原有 `-1` 语义。
 - 权限查询失败不再回退 `JOIN` 提示，改为 `known=false`、`bits=0`，调用方可区分“未知”和“拒绝”。
+- `ChannelTree::remove_channel` 删除整棵子树（与服务器行为一致）；新增 `remove_subtree` 返回全部被删频道。
+- `ChannelTree::update_channel` 统一重建结构，拒绝把频道挂到自己的后代下；`path_to`/`print_tree` 遇环终止。
 
 ### Fixed
 

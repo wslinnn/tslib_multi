@@ -89,49 +89,103 @@ impl ChannelTree {
         self.rebuild_structure();
     }
 
-    /// Remove a channel from the tree
+    /// Remove a channel and its whole subtree from the tree.
+    ///
+    /// Returns the removed root channel (the first entry of
+    /// [`Self::remove_subtree`]). The server deletes channel subtrees, so
+    /// keeping descendants would leave an inconsistent local tree.
     pub fn remove_channel(&mut self, id: u64) -> Option<Channel> {
-        let channel = self.channels.remove(&id)?;
-
-        // Remove from roots
-        self.roots.retain(|&x| x != id);
-
-        // Remove from parent's children
-        if let Some(children) = self.children.get_mut(&channel.parent_id) {
-            children.retain(|&x| x != id);
+        let mut removed = self.remove_subtree(id);
+        if removed.is_empty() {
+            None
+        } else {
+            Some(removed.remove(0))
         }
+    }
 
-        // Remove this channel's children entry
-        self.children.remove(&id);
+    /// Remove a channel and all of its descendants.
+    ///
+    /// Returns the removed channels in pre-order (root first). Unknown ids
+    /// return an empty list.
+    pub fn remove_subtree(&mut self, id: u64) -> Vec<Channel> {
+        let mut ids = Vec::new();
+        let mut visited = HashSet::new();
+        self.collect_subtree_ids(id, &mut ids, &mut visited);
 
-        Some(channel)
+        let mut removed = Vec::with_capacity(ids.len());
+        for channel_id in ids {
+            if let Some(channel) = self.channels.remove(&channel_id) {
+                removed.push(channel);
+            }
+        }
+        if !removed.is_empty() {
+            self.rebuild_structure();
+        }
+        removed
+    }
+
+    fn collect_subtree_ids(&self, id: u64, ids: &mut Vec<u64>, visited: &mut HashSet<u64>) {
+        if !self.channels.contains_key(&id) || !visited.insert(id) {
+            return;
+        }
+        ids.push(id);
+        if let Some(children) = self.children.get(&id) {
+            for &child in children {
+                self.collect_subtree_ids(child, ids, visited);
+            }
+        }
     }
 
     /// Update a channel
+    ///
+    /// Reparenting under one of its own descendants would create a cycle; in
+    /// that case the old parent is kept and the rest of the update applies.
     pub fn update_channel(&mut self, channel: Channel) {
-        let old_parent = self.channels.get(&channel.id).map(|c| c.parent_id);
+        let mut channel = channel;
 
-        // If parent changed, update structure
-        if let Some(old_parent_id) = old_parent {
-            if old_parent_id != channel.parent_id {
-                // Remove from old parent
-                if let Some(children) = self.children.get_mut(&old_parent_id) {
-                    children.retain(|&x| x != channel.id);
-                }
-
-                // Add to new parent
-                if channel.parent_id == 0 {
-                    self.roots.push(channel.id);
-                } else {
-                    self.children
-                        .entry(channel.parent_id)
-                        .or_default()
-                        .push(channel.id);
-                }
-            }
+        if channel.parent_id != 0 && self.would_create_cycle(channel.id, channel.parent_id) {
+            let old_parent = self
+                .channels
+                .get(&channel.id)
+                .map(|c| c.parent_id)
+                .unwrap_or(0);
+            tracing::warn!(
+                "Channel {} cannot be reparented under its descendant {}; keeping parent {}",
+                channel.id,
+                channel.parent_id,
+                old_parent
+            );
+            channel.parent_id = old_parent;
         }
 
         self.channels.insert(channel.id, channel);
+        // Rebuild instead of patching child lists: this also wires up a
+        // channel that was not in the tree yet and prevents duplicates.
+        self.rebuild_structure();
+    }
+
+    fn would_create_cycle(&self, id: u64, new_parent: u64) -> bool {
+        if id == new_parent {
+            return true;
+        }
+
+        let mut current = new_parent;
+        let mut visited = 0usize;
+        while current != 0 {
+            if current == id {
+                return true;
+            }
+            visited += 1;
+            if visited > self.channels.len() {
+                // Existing broken data: treat as a cycle.
+                return true;
+            }
+            match self.channels.get(&current) {
+                Some(channel) => current = channel.parent_id,
+                None => break,
+            }
+        }
+        false
     }
 
     /// Get a channel by ID
@@ -220,8 +274,12 @@ impl ChannelTree {
     pub fn path_to(&self, id: u64) -> Vec<&Channel> {
         let mut path = Vec::new();
         let mut current_id = id;
+        let mut visited = HashSet::new();
 
         while let Some(channel) = self.channels.get(&current_id) {
+            if !visited.insert(channel.id) {
+                break;
+            }
             path.push(channel);
             if channel.parent_id == 0 {
                 break;
@@ -289,20 +347,30 @@ impl ChannelTree {
     /// Print the tree structure (for debugging)
     pub fn print_tree(&self) -> String {
         let mut output = String::new();
+        let mut visited = HashSet::new();
         for root in &self.roots {
-            self.print_subtree(*root, 0, &mut output);
+            self.print_subtree(*root, 0, &mut visited, &mut output);
         }
         output
     }
 
-    fn print_subtree(&self, id: u64, depth: usize, output: &mut String) {
+    fn print_subtree(
+        &self,
+        id: u64,
+        depth: usize,
+        visited: &mut HashSet<u64>,
+        output: &mut String,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
         if let Some(channel) = self.channels.get(&id) {
             let indent = "  ".repeat(depth);
             output.push_str(&format!("{}{}\n", indent, channel.name));
 
             if let Some(children) = self.children.get(&id) {
                 for &child_id in children {
-                    self.print_subtree(child_id, depth + 1, output);
+                    self.print_subtree(child_id, depth + 1, visited, output);
                 }
             }
         }
@@ -368,6 +436,56 @@ mod tests {
     fn remove_nonexistent_returns_none() {
         let mut tree = ChannelTree::new();
         assert!(tree.remove_channel(99).is_none());
+    }
+
+    #[test]
+    fn remove_subtree_removes_descendants() {
+        let mut tree = ChannelTree::new();
+        tree.add_channel(ch(1, 0, "Root", 0));
+        tree.add_channel(ch(2, 1, "Child", 0));
+        tree.add_channel(ch(3, 2, "Grandchild", 0));
+        tree.add_channel(ch(4, 0, "Sibling", 1));
+
+        let removed = tree.remove_subtree(1);
+
+        assert_eq!(removed.len(), 3);
+        assert_eq!(removed[0].id, 1);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree.roots()[0].id, 4);
+    }
+
+    #[test]
+    fn update_inserts_channel_not_in_tree() {
+        let mut tree = ChannelTree::new();
+        tree.update_channel(ch(1, 0, "New", 0));
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree.roots().len(), 1);
+    }
+
+    #[test]
+    fn update_rejects_cycle() {
+        let mut tree = ChannelTree::new();
+        tree.add_channel(ch(1, 0, "Root", 0));
+        tree.add_channel(ch(2, 1, "Child", 0));
+
+        // Reparenting the root under its own child must be ignored.
+        tree.update_channel(ch(1, 2, "Root", 0));
+
+        assert_eq!(tree.get(1).unwrap().parent_id, 0);
+        assert_eq!(tree.roots().len(), 1);
+        assert_eq!(tree.children(2).len(), 0);
+    }
+
+    #[test]
+    fn path_and_print_terminate_on_cycle() {
+        let tree = ChannelTree::from_channels(vec![ch(1, 2, "A", 0), ch(2, 1, "B", 0)]);
+
+        let path = tree.path_to(1);
+        assert!(path.len() <= 2);
+
+        // Neither channel is a root, so the printable tree is empty; the
+        // important part is that it terminates.
+        assert!(tree.print_tree().lines().count() <= 2);
     }
 
     #[test]
