@@ -1,7 +1,7 @@
 # 交接 / 当前进度（Handoff）
 
 > 最后更新：2026-11-05  
-> 当前 HEAD：`2ef944c docs(api): 补充 Android arm64 JNI 验证结果`  
+> 当前 HEAD：`401bfed fix(audio): 清理离开与空闲用户的解码器`  
 > 工作区：干净  
 > 持久规范：`AGENTS.md`；需求：`docs/spec-error-fixes-performance.md`；API 差异：`docs/api-changes/v0.2.0.md`
 
@@ -36,10 +36,11 @@
 | `17b4dee` | `User.is_talking` 维护 |
 | `988f1eb` | Java 缺失 native 补齐 + `AudioSink` |
 | `5f00eaa` | Java `EchoCanceller` |
+| `401bfed` | FR-AU-06 解码器清理：`UserLeft` 事件桥、5 分钟空闲淘汰、512 LRU 上限 |
 
 ### 验证
 
-- `tslib-core` 73 passed；`tslib-bot` 30；`tslib-audio` 23；`tslib-channel` 39；`tslib-chat` 115。
+- `tslib-core` 73 passed；`tslib-bot` 30；`tslib-audio` 30；`tslib-channel` 39；`tslib-chat` 115。
 - 合并测试用 `-j 1` 通过（默认并行偶发 rustc 崩溃）。
 - `cargo check -p tslib-ffi -p tslib-python -p test-suite` 通过。
 - Host JNI：`cargo check/build -p tslib-jni` 通过；`dumpbin` 确认符号。
@@ -54,6 +55,7 @@
 |---|---|
 | 依赖层 | 不修改 `tsclientlib/tsproto`、不 fork、不打补丁 |
 | jitter buffer | **固定 60 ms（3 帧）**，迟到即丢，不随网络增长 |
+| 解码器池 | 空闲 **5 分钟**淘汰；上限 **512**，LRU；`UserLeft` 立即清理 |
 | `max_memory_download` | 默认 **64 MiB**；超出报 `FileTransferFailed`，不截断 |
 | 初始静音 | 默认 **true**（隐私安全），暂未做成 `ClientConfig` 字段 |
 | 组 whisper | 本轮不做 |
@@ -66,13 +68,12 @@
 
 ### P1（低风险、建议下一批）
 
-1. **FR-AU-06 解码器清理**：`AudioManager::remove_user` 在 `UserLeft` 时调用；加空闲淘汰。
-2. **PR-02 零拷贝**：事件/音频负载改 `Arc`，减少 clone。
-3. **PR-03 说话超时 O(log n)**：`talking_users` 改最小堆/时间轮。
-4. **PR-08/09 音频回调零分配**：采集/播放/mixer 预分配复用。
-5. **FR-FS-06 上传校验**：上传完成后 `ftgetfileinfo` 校验 size。
-6. **FR-SC-02 脱敏**：`Identity`/`ClientConfig` 的 `Debug` 与日志 redact。
-7. **Python 绑定补齐**：`ChatHistory.add_*`、实时 `server_info()`、事件字段、GIL 说明。
+1. **PR-02 零拷贝**：事件/音频负载改 `Arc`，减少 clone。
+2. **PR-03 说话超时 O(log n)**：`talking_users` 改最小堆/时间轮。
+3. **PR-08/09 音频回调零分配**：采集/播放/mixer 预分配复用。
+4. **FR-FS-06 上传校验**：上传完成后 `ftgetfileinfo` 校验 size。
+5. **FR-SC-02 脱敏**：`Identity`/`ClientConfig` 的 `Debug` 与日志 redact。
+6. **Python 绑定补齐**：`ChatHistory.add_*`、实时 `server_info()`、事件字段、GIL 说明。
 
 ### P1（需要设计/较大改动）
 

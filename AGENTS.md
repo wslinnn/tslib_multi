@@ -95,6 +95,7 @@ arm64 已通过；x86_64 尚未跑。
 ## 4. 踩坑
 
 - **不要 `cargo fmt --all`**：本仓库 rustfmt/行尾差异会重排全仓库，产生大量无关 diff。只格式化改动的文件，或手动保持格式。
+- 对单个文件跑 `rustfmt` 会顺着 `mod` 声明递归格式化子模块；跑完用 `git status` 检查，`git checkout --` 掉未改动的文件。
 - 默认并行 `cargo test` 偶发 rustc `STATUS_STACK_BUFFER_OVERRUN`；用 `-j 1`。
 - `Cargo.lock` 被 `.gitignore` 忽略，不要强行提交。
 - Android `cargo ndk` 失败时看清楚 `CARGO_EXIT`；不要只看 shell 退出码。
@@ -116,11 +117,11 @@ arm64 已通过；x86_64 尚未跑。
 
 1. 命令结果等待（actor，暂缓）
 2. 文件流式/续传/上传校验、`ftstop/ftgetfileinfo/ftlist`
-3. 音频 jitter/PLC/重采样/AEC 集成/解码器清理/设备格式
+3. 音频 jitter/PLC/重采样/AEC 集成/设备格式
 4. 性能 PR-01~16（除日志外）
 5. Python 绑定补齐/GIL、JNI FileList JSON/日志、敏感信息脱敏
 6. `PermissionHints.known`、`maxclients` 语义、`joinable_channels` 人数
 7. ServerQuery/Streams/命令层/头像图标/完整 view 等 P2
 8. Android x86_64、真实服务器/真机、性能基线、CI semver 门禁、Java 测试
 
-**下一批建议**（低风险高收益）：FR-AU-06 解码器清理、PR-02/03/08/09 热路径、FR-FS-06 上传校验、FR-SC-02 脱敏、Python 补齐。
+**下一批建议**（低风险高收益）：PR-02/03/08/09 热路径、FR-FS-06 上传校验、FR-SC-02 脱敏、Python 补齐。
