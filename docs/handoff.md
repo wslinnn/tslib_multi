@@ -1,7 +1,7 @@
 # 交接 / 当前进度（Handoff）
 
 > 最后更新：2026-11-05  
-> 当前 HEAD：`7a42355 feat(python): 补齐历史写入、实时服务器信息与事件负载`  
+> 当前 HEAD：`680402c fix(channel): 删除子树并防止频道树成环`  
 > 工作区：干净  
 > 持久规范：`AGENTS.md`；需求：`docs/spec-error-fixes-performance.md`；API 差异：`docs/api-changes/v0.2.0.md`
 
@@ -43,15 +43,21 @@
 | `2e0e4cd` | FR-SC-02 `ClientConfig`/Builder `Debug` 密码脱敏 |
 | `1da8cc6` | FR-FS-06 上传后 `ftgetfileinfo` 校验落盘大小 |
 | `7a42355` | FR-BD-04 Python 历史写入/实时 server info/事件负载/GIL 文档 |
+| `76d4525` | PR-10 音频回调 `try_lock`，实时线程不阻塞 |
+| `81f742d` | FR-BD-05 JNI FileList `serde_json`；发布版日志 `Info`；日志不输出正文 |
+| `9fa75bf` | FR-ST-02/05 `MaxClientsKind`、`Inherited` 解析、按人数排除满员频道 |
+| `d16b46e` | FR-ST-03 收尾：`PermissionHints.known`、Java/Python 绑定 |
+| `680402c` | FR-ST-04 删除子树、reparent 环检测、路径/打印防环 |
 
 ### 验证
 
-- `tslib-core` 77 passed；`tslib-bot` 30；`tslib-audio` 33；`tslib-channel` 39；`tslib-chat` 116。
+- `tslib-core` 79 passed；`tslib-bot` 30；`tslib-audio` 33；`tslib-channel` 47；`tslib-chat` 116。
 - 合并测试用 `-j 1` 通过（默认并行偶发 rustc 崩溃）。
 - `cargo check -p tslib-ffi -p tslib-python -p test-suite` 通过。
 - Host JNI：`cargo check/build -p tslib-jni` 通过；`dumpbin` 确认符号。
 - Java：JDK 21 `javac` 全部通过；`javap -s` 核对 descriptor。
-- Android arm64：`cargo ndk -t arm64-v8a check -p tslib-jni --features vendored-openssl` 通过（本轮改动后已复跑，`CARGO_EXIT=0`）。
+- Android arm64 / x86_64：`cargo ndk -t <abi> check -p tslib-jni --features vendored-openssl` 均通过（`CARGO_EXIT=0`）。
+- JNI 单元测试 2 passed；Java `javac`（JDK 21）通过，`Channel` 构造描述符已核对。
 - PR-08/09 为稳态零逐帧分配：缓冲池空或首次回调仍会分配；尚未用 dhat 建立分配基线。
 
 ---
@@ -66,6 +72,9 @@
 | 音频事件负载 | `Arc<[u8]>`，广播与返回事件共享，不再深拷贝 |
 | 上传完成判定 | 以 `ftgetfileinfo` 落盘大小为准；2568 无权限仅 warning |
 | 敏感信息 | `ClientConfig`/Builder 的 `Debug` 输出 `<redacted>` |
+| 频道容量 | `MaxClientsKind` 区分 Unlimited/Inherited/Limited/Unknown；`Inherited` 沿父链解析 |
+| 权限未知 | 查询失败 `known=false`、`bits=0`，不再回退 `JOIN` |
+| 频道删除 | `remove_channel` 删除整棵子树，与服务器一致 |
 | `max_memory_download` | 默认 **64 MiB**；超出报 `FileTransferFailed`，不截断 |
 | 初始静音 | 默认 **true**（隐私安全），暂未做成 `ClientConfig` 字段 |
 | 组 whisper | 本轮不做 |
@@ -78,10 +87,10 @@
 
 ### P1（低风险、建议下一批）
 
-1. **FR-BD-05**：JNI `FileList` 改 JSON 库序列化；复查绑定层日志脱敏。
+1. **PR-13 可观测性**：采集丢帧、PLC、mixer 争用、事件丢弃计数与查询接口。
 2. **PR-04**：`users()`/`channels()` 快照化（`Arc<[...]>` 或迭代器），先定 API 方案。
 3. **PR-06/07**：事件总线满载时控制事件不丢；慢 handler 不阻塞事件泵（需 actor 设计）。
-4. **PR-10/11**：音频回调锁最小化、解码器分片锁/复用缓冲（需真机基准）。
+4. **PR-11**：解码器分片锁/复用缓冲（仅多线程调用 `process_incoming` 时有收益）。
 
 ### P1（需要设计/较大改动）
 
@@ -96,7 +105,6 @@
 
 ### 验证遗留
 
-- Android x86_64 交叉检查。
 - 真实 TS3/TS6 服务器集成测试。
 - Android 真机音频/AEC/功耗测试。
 - `docs/perf-baseline.md`、`docs/protocol-behavior.md`。
