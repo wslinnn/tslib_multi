@@ -1,7 +1,7 @@
 # 交接 / 当前进度（Handoff）
 
 > 最后更新：2026-11-05  
-> 当前 HEAD：`8483907 feat(audio): AudioReceived 事件携带语音包序号`  
+> 当前 HEAD：`384460b feat(audio): 固定 60ms jitter buffer 与序号 PLC`  
 > 工作区：干净  
 > 持久规范：`AGENTS.md`；需求：`docs/spec-error-fixes-performance.md`；API 差异：`docs/api-changes/v0.2.0.md`
 
@@ -51,10 +51,11 @@
 | `033078b` | PR-13 采集/播放/解码/PLC 可观测计数 |
 | `1cf4054` | PR-04（增量）`users_snapshot`/`channels_snapshot` 共享快照 |
 | `8483907` | `AudioReceived` 暴露 `seq`，供下游检测丢帧/PLC |
+| `384460b` | FR-AU-03/04 固定 60 ms jitter buffer、迟到丢弃、gap PLC |
 
 ### 验证
 
-- `tslib-core` 80 passed；`tslib-bot` 30；`tslib-audio` 37；`tslib-channel` 47；`tslib-chat` 116。
+- `tslib-core` 80 passed；`tslib-bot` 30；`tslib-audio` 46；`tslib-channel` 47；`tslib-chat` 116。
 - 合并测试用 `-j 1` 通过（默认并行偶发 rustc 崩溃）。
 - `cargo check -p tslib-ffi -p tslib-python -p test-suite` 通过。
 - Host JNI：`cargo check/build -p tslib-jni` 通过；`dumpbin` 确认符号。
@@ -70,7 +71,7 @@
 | 项 | 决定 |
 |---|---|
 | 依赖层 | 不修改 `tsclientlib/tsproto`、不 fork、不打补丁 |
-| jitter buffer | **固定 60 ms（3 帧）**，迟到即丢，不随网络增长 |
+| jitter buffer | **固定 60 ms（3 帧）**，迟到即丢，不随网络增长；`JitterBuffer` + `process_incoming_with_seq`/`pump_jitter` |
 | 解码器池 | 空闲 **5 分钟**淘汰；上限 **512**，LRU；`UserLeft` 立即清理 |
 | 音频事件负载 | `Arc<[u8]>`，广播与返回事件共享，不再深拷贝 |
 | 上传完成判定 | 以 `ftgetfileinfo` 落盘大小为准；2568 无权限仅 warning |
@@ -93,7 +94,7 @@
 ### P1（低风险、建议下一批）
 
 1. **PR-04 后续**：JNI/Python 读取改用快照；若要让 `users()`/`channels()` 本身零拷贝，需改返回类型（待拍板）。
-2. **FR-AU-03/04**：事件已有 `seq`；下一步给 `AudioManager` 增加带 `seq` 的入口与定时 release pump，实现固定 60 ms jitter + PLC。
+2. **FR-AU-05/07/08**：重采样、AEC 接入 AudioManager、设备格式协商（需真机验证）。
 3. **PR-06/07**：事件总线满载时控制事件不丢；慢 handler 不阻塞事件泵（需 actor 设计）。
 4. **PR-11**：解码器分片锁/复用缓冲（仅多线程调用 `process_incoming` 时有收益）。
 
@@ -102,7 +103,7 @@
 - **FR-CN-02 命令结果**：先做 actor + 事件泵，再实现 `try_*` async 方法；不要在当前 `&mut Client` 上直接 await。
 - **完整事件流**：每消费者 `EventStream`、`notification` 兜底、慢消费者策略（同 actor）。
 - **FR-FS-03 流式/续传**：`download_file_to_path`/`upload_file_from_path`、`resume`/`seek`。
-- **音频管线**：FR-AU-03/04/05/07/08（AEC 接入、重采样、jitter、PLC、设备格式）。
+- **音频管线**：FR-AU-05/07/08（重采样、AEC 接入、设备格式）。
 
 ### P2（功能对齐，暂缓）
 
