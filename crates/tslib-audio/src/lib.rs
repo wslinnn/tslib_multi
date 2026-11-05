@@ -37,8 +37,10 @@ pub mod mixer;
 pub mod playback;
 
 // Re-exports
+pub use capture::{CaptureDevice, CaptureStats, SampleBufferPool};
 pub use codec::{Decoder, Encoder, OpusCodec};
 pub use config::{AudioConfig, DecoderPoolConfig};
 pub use echo::{EchoEngine, SpeexEchoEngine};
 pub use error::{AudioError, Result};
-pub use manager::AudioManager;
+pub use manager::{AudioManager, AudioStats};
+pub use playback::{PlaybackDevice, PlaybackStats};

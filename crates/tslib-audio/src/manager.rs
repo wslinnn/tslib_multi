@@ -1,11 +1,12 @@
 //! High-level audio manager
 
-use crate::capture::{CaptureDevice, SampleBufferPool, VoiceActivityDetector};
+use crate::capture::{CaptureDevice, CaptureStats, SampleBufferPool, VoiceActivityDetector};
 use crate::codec::{Decoder, Encoder, OpusCodec, OpusDecoder, OpusEncoder};
 use crate::config::{AudioConfig, DecoderPoolConfig};
 use crate::error::{AudioError, Result};
-use crate::playback::PlaybackDevice;
+use crate::playback::{PlaybackDevice, PlaybackStats};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -33,10 +34,29 @@ pub struct AudioManager {
     decoders: Arc<RwLock<HashMap<u16, DecoderSlot>>>,
     /// Last time the decoder cache was swept for idle users
     last_sweep: StdMutex<Instant>,
+    /// Successfully decoded incoming packets
+    decoded_packets: AtomicU64,
+    /// PLC frames generated for lost packets
+    plc_frames: AtomicU64,
     /// VAD
     vad: Arc<Mutex<VoiceActivityDetector>>,
     /// Is capturing
     is_capturing: Arc<RwLock<bool>>,
+}
+
+/// Snapshot of audio pipeline counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioStats {
+    /// Capture callbacks/frames counters.
+    pub capture: CaptureStats,
+    /// Playback blocks counter.
+    pub playback: PlaybackStats,
+    /// Incoming packets decoded successfully.
+    pub decoded_packets: u64,
+    /// PLC frames generated after packet loss.
+    pub plc_frames: u64,
+    /// Cached per-user decoders.
+    pub decoders: usize,
 }
 
 /// An encoded audio packet ready for transmission
@@ -68,6 +88,8 @@ impl AudioManager {
             encoder: Arc::new(Mutex::new(encoder)),
             decoders: Arc::new(RwLock::new(HashMap::new())),
             last_sweep: StdMutex::new(Instant::now()),
+            decoded_packets: AtomicU64::new(0),
+            plc_frames: AtomicU64::new(0),
             vad: Arc::new(Mutex::new(vad)),
             is_capturing: Arc::new(RwLock::new(false)),
         })
@@ -192,7 +214,9 @@ impl AudioManager {
                 .get_mut(&user_id)
                 .expect("decoder was just inserted");
             slot.last_active = now;
-            slot.decoder.decode(data, &mut samples)?
+            let decoded = slot.decoder.decode(data, &mut samples)?;
+            self.decoded_packets.fetch_add(1, Ordering::Relaxed);
+            decoded
         };
 
         // Add to playback mixer
@@ -214,6 +238,7 @@ impl AudioManager {
             let mut samples =
                 vec![0i16; self.config.frame_size_samples() * self.config.channels as usize];
             let decoded = slot.decoder.decode_plc(&mut samples)?;
+            self.plc_frames.fetch_add(1, Ordering::Relaxed);
             (samples, decoded)
         };
 
@@ -286,6 +311,24 @@ impl AudioManager {
     /// Number of cached per-user decoders (diagnostics).
     pub async fn decoder_count(&self) -> usize {
         self.decoders.read().await.len()
+    }
+
+    /// Snapshot of capture, playback and decoder counters.
+    ///
+    /// Counters are cumulative since the manager was created. They are
+    /// intended for diagnostics dashboards, not per-packet control flow.
+    pub async fn stats(&self) -> AudioStats {
+        let capture = self.capture.lock().await.stats();
+        let playback = self.playback.lock().await.stats();
+        let decoders = self.decoders.read().await.len();
+
+        AudioStats {
+            capture,
+            playback,
+            decoded_packets: self.decoded_packets.load(Ordering::Relaxed),
+            plc_frames: self.plc_frames.load(Ordering::Relaxed),
+            decoders,
+        }
     }
 
     /// Sweep idle decoders if the sweep interval has elapsed.
@@ -405,6 +448,21 @@ mod tests {
                 Err(AudioError::UnsupportedCodec(value)) if value == codec
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn stats_start_at_zero() {
+        let audio = AudioManager::new(AudioConfig::default()).unwrap();
+        assert_eq!(audio.stats().await, AudioStats::default());
+    }
+
+    #[tokio::test]
+    async fn plc_updates_counter() {
+        let audio = AudioManager::new(AudioConfig::default()).unwrap();
+        insert_decoders(&audio, &[(7, Instant::now())]).await;
+
+        audio.handle_packet_loss(7).await.unwrap();
+        assert_eq!(audio.stats().await.plc_frames, 1);
     }
 
     #[tokio::test]

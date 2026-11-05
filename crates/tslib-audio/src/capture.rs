@@ -20,6 +20,17 @@ pub struct CaptureDevice {
     start_time: Option<Instant>,
 }
 
+/// Counters for the realtime capture path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureStats {
+    /// Frames cut from the accumulation buffer.
+    pub frames_captured: u64,
+    /// Frames dropped because the encoder channel was full.
+    pub frames_dropped: u64,
+    /// Input callbacks dropped because the buffer lock was contended.
+    pub callbacks_dropped: u64,
+}
+
 /// Shared state between capture thread and main thread
 struct CaptureState {
     /// Is capturing active
@@ -30,6 +41,12 @@ struct CaptureState {
     vad_threshold: AtomicU64,
     /// VAD enabled
     vad_enabled: AtomicBool,
+    /// Captured frame counter
+    frames_captured: AtomicU64,
+    /// Dropped frame counter
+    frames_dropped: AtomicU64,
+    /// Dropped callback counter
+    callbacks_dropped: AtomicU64,
 }
 
 impl CaptureState {
@@ -39,6 +56,9 @@ impl CaptureState {
             volume: AtomicU64::new((config.input_volume * 100.0) as u64),
             vad_threshold: AtomicU64::new((config.vad_threshold * 1000.0) as u64),
             vad_enabled: AtomicBool::new(config.vad_enabled),
+            frames_captured: AtomicU64::new(0),
+            frames_dropped: AtomicU64::new(0),
+            callbacks_dropped: AtomicU64::new(0),
         }
     }
 
@@ -126,8 +146,7 @@ impl CaptureDevice {
     }
 
     /// List available capture devices
-    pub fn list_devices() -> Result<Vec<DeviceInfo>> {
-        let host = cpal::default_host();
+    pub fn list_devices() -> Result<Vec<DeviceInfo>> {        let host = cpal::default_host();
         let default_device = host.default_input_device();
         let default_name = default_device
             .as_ref()
@@ -225,6 +244,7 @@ impl CaptureDevice {
                     // the realtime capture thread on this lock; a contended
                     // callback is dropped rather than stalling the device.
                     let Ok(mut buf) = buffer_clone.try_lock() else {
+                        state.callbacks_dropped.fetch_add(1, Ordering::Relaxed);
                         return;
                     };
                     buf.reserve(data.len());
@@ -256,6 +276,7 @@ impl CaptureDevice {
                             timestamp_us,
                             voice_activity,
                         };
+                        state.frames_captured.fetch_add(1, Ordering::Relaxed);
 
                         // Try to send, but don't block if receiver is full
                         if let Err(e) = frame_tx.try_send(frame) {
@@ -263,6 +284,7 @@ impl CaptureDevice {
                                 mpsc::error::TrySendError::Full(frame) => {
                                     // Channel full, drop frame (acceptable for
                                     // real-time audio) and keep its buffer.
+                                    state.frames_dropped.fetch_add(1, Ordering::Relaxed);
                                     pool_clone.recycle(frame.samples);
                                 }
                                 mpsc::error::TrySendError::Closed(_) => {
@@ -316,6 +338,15 @@ impl CaptureDevice {
     /// Check if capturing
     pub fn is_active(&self) -> bool {
         self.state.is_active.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot of capture-path counters.
+    pub fn stats(&self) -> CaptureStats {
+        CaptureStats {
+            frames_captured: self.state.frames_captured.load(Ordering::Relaxed),
+            frames_dropped: self.state.frames_dropped.load(Ordering::Relaxed),
+            callbacks_dropped: self.state.callbacks_dropped.load(Ordering::Relaxed),
+        }
     }
 
     /// Set input volume (0.0-2.0)
@@ -414,8 +445,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sample_pool_reuses_buffers() {
-        let pool = SampleBufferPool::new(2);
+    fn stats_start_at_zero() {
+        let device = CaptureDevice::new(AudioConfig::default()).unwrap();
+        assert_eq!(device.stats(), CaptureStats::default());
+    }
+
+    #[test]
+    fn sample_pool_reuses_buffers() {        let pool = SampleBufferPool::new(2);
         let buffer = pool.acquire(8);
         assert!(buffer.capacity() >= 8);
         pool.recycle(buffer);

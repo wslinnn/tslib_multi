@@ -20,12 +20,21 @@ pub struct PlaybackDevice {
     state: Arc<PlaybackState>,
 }
 
+/// Counters for the realtime playback path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlaybackStats {
+    /// Output blocks replaced with silence because the mixer was locked.
+    pub dropped_blocks: u64,
+}
+
 /// Shared state between playback thread and main thread
 struct PlaybackState {
     /// Is playback active
     is_active: AtomicBool,
     /// Output volume (scaled by 100 for atomic ops)
     volume: AtomicU64,
+    /// Blocks dropped due to mixer lock contention
+    dropped_blocks: AtomicU64,
 }
 
 impl PlaybackState {
@@ -33,6 +42,7 @@ impl PlaybackState {
         Self {
             is_active: AtomicBool::new(false),
             volume: AtomicU64::new((volume * 100.0) as u64),
+            dropped_blocks: AtomicU64::new(0),
         }
     }
 
@@ -152,7 +162,10 @@ impl PlaybackDevice {
                         // underrun. Output silence for this block instead.
                         match mixer.try_lock() {
                             Ok(mut mixer_guard) => mixer_guard.mix(&mut pcm_buffer),
-                            Err(_) => pcm_buffer.fill(0),
+                            Err(_) => {
+                                state.dropped_blocks.fetch_add(1, Ordering::Relaxed);
+                                pcm_buffer.fill(0);
+                            }
                         }
                     }
 
@@ -196,6 +209,13 @@ impl PlaybackDevice {
     /// Check if playing
     pub fn is_active(&self) -> bool {
         self.state.is_active.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot of playback-path counters.
+    pub fn stats(&self) -> PlaybackStats {
+        PlaybackStats {
+            dropped_blocks: self.state.dropped_blocks.load(Ordering::Relaxed),
+        }
     }
 
     /// Set output volume (0.0-2.0)
@@ -321,5 +341,16 @@ impl UserAudioBuffer {
     /// Check if buffer is stale (no recent activity)
     pub fn is_stale(&self, timeout: std::time::Duration) -> bool {
         self.last_activity.elapsed() > timeout
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_start_at_zero() {
+        let device = PlaybackDevice::new(AudioConfig::default()).unwrap();
+        assert_eq!(device.stats(), PlaybackStats::default());
     }
 }
