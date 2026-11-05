@@ -83,6 +83,19 @@ const MAX_AUDIO_PAYLOAD: usize = tsproto::MAX_UDP_PACKET_LENGTH - AUDIO_PACKET_O
 const MAX_WHISPER_CLIENTS: usize = 32;
 const MAX_WHISPER_CHANNELS: usize = 255;
 
+/// In-flight `ftgetfilelist` request, keyed by the server return code.
+struct PendingFileList {
+    channel_id: u64,
+    path: String,
+    entries: Vec<FileEntry>,
+}
+
+/// In-flight `permoverview` request, keyed by the server return code.
+struct PendingPermOverview {
+    channel_id: u64,
+    perms: HashMap<u32, i32>,
+}
+
 fn validate_audio_payload(data_len: usize) -> Result<()> {
     if data_len > MAX_AUDIO_PAYLOAD {
         return Err(Error::InvalidArgument(format!(
@@ -205,11 +218,10 @@ pub struct Client {
     /// tsclientlib's state book doesn't reflect our clientupdate commands
     /// (the server doesn't echo them back), so we track it separately.
     self_input_muted: Option<bool>,
-    /// Pending file list request: accumulates entries until FileListFinished
-    pending_file_list: Option<(u64, String, Vec<FileEntry>)>,
-    /// Pending permoverview request: accumulates permission entries
-    /// (channel_id, HashMap<permission_id, max_value>)
-    pending_perm_overview: Option<(u64, HashMap<u32, i32>)>,
+    /// Pending file list requests: return code -> request state
+    pending_file_lists: HashMap<u16, PendingFileList>,
+    /// Pending permoverview requests: return code -> request state
+    pending_perm_overviews: HashMap<u16, PendingPermOverview>,
     /// Stream items received during `wait_connected` that were not the
     /// BookEvents it waits for. They are processed by the next event pump
     /// call so messages/audio from the connection handshake are not lost.
@@ -249,8 +261,8 @@ impl Client {
             pending_downloads: HashMap::new(),
             pending_uploads: HashMap::new(),
             self_input_muted: None,
-            pending_file_list: None,
-            pending_perm_overview: None,
+            pending_file_lists: HashMap::new(),
+            pending_perm_overviews: HashMap::new(),
             pending_stream_items: VecDeque::new(),
             whisper_clients: Vec::new(),
             whisper_channels: Vec::new(),
@@ -707,7 +719,7 @@ impl Client {
             }
             StreamItem::MessageEvent(msg) => {
                 log::info!("StreamItem::MessageEvent: cmd={:?}", msg.get_command_name());
-                self.process_message_event(msg).into_iter().collect()
+                self.process_message_event(msg)
             }
             StreamItem::FileDownload(handle, mut result) => {
                 let (channel_id, path) = self
@@ -1065,16 +1077,41 @@ impl Client {
     ///
     /// Note: Text messages and pokes arrive via `BookEvents` as `Event::Message`,
     /// not here. This handles remaining protocol messages like channellistfinished.
-    fn process_message_event(&mut self, msg: InMessage) -> Option<Event> {
+    fn process_message_event(&mut self, msg: InMessage) -> Vec<Event> {
         log::info!("process_message_event: cmd={}", msg.get_command_name());
         match msg {
             InMessage::FileList(file_list) => {
                 let count = file_list.iter().count();
                 log::info!("Received FileList with {} entries", count);
-                if let Some((_, _, ref mut entries)) = self.pending_file_list {
+
+                let key = file_list
+                    .return_code
+                    .as_ref()
+                    .and_then(|code| code.parse::<u16>().ok());
+                let (fallback_cid, fallback_path) = file_list
+                    .iter()
+                    .next()
+                    .map(|part| (part.channel_id.0, part.path.clone()))
+                    .unwrap_or((0, String::new()));
+                let pending = match key {
+                    Some(key) => self.pending_file_lists.get_mut(&key),
+                    None => self
+                        .pending_file_lists
+                        .values_mut()
+                        .find(|pending| {
+                            pending.channel_id == fallback_cid && pending.path == fallback_path
+                        }),
+                };
+
+                if let Some(pending) = pending {
                     for part in file_list.iter() {
-                        log::info!("  file entry: name={}, size={}, is_file={}", part.name, part.size, part.is_file);
-                        entries.push(FileEntry {
+                        log::info!(
+                            "  file entry: name={}, size={}, is_file={}",
+                            part.name,
+                            part.size,
+                            part.is_file
+                        );
+                        pending.entries.push(FileEntry {
                             name: part.name.clone(),
                             size: part.size,
                             datetime: part.date_time.unix_timestamp(),
@@ -1082,102 +1119,179 @@ impl Client {
                         });
                     }
                 } else {
-                    log::warn!("Received FileList but no pending_file_list!");
+                    log::warn!("Received FileList but no pending request");
                 }
-                None
+                Vec::new()
             }
-            InMessage::FileListFinished(_finished) => {
+            InMessage::FileListFinished(finished) => {
                 log::info!("Received FileListFinished");
-                if let Some((channel_id, path, entries)) = self.pending_file_list.take() {
-                    log::info!("File list complete: channel={}, path={}, {} files", channel_id, path, entries.len());
-                    let event = Event::FileListReceived { channel_id, path, files: entries };
-                    let _ = self.event_tx.send(event.clone());
-                    Some(event)
-                } else {
-                    log::warn!("FileListFinished but no pending_file_list");
-                    None
+                let mut events = Vec::new();
+                for part in finished.iter() {
+                    let channel_id = part.channel_id.0;
+                    let path = part.path.clone();
+                    let key = self
+                        .pending_file_lists
+                        .iter()
+                        .find(|(_, pending)| {
+                            pending.channel_id == channel_id && pending.path == path
+                        })
+                        .map(|(key, _)| *key);
+
+                    if let Some(key) = key {
+                        if let Some(pending) = self.pending_file_lists.remove(&key) {
+                            log::info!(
+                                "File list complete: channel={}, path={}, {} files",
+                                pending.channel_id,
+                                pending.path,
+                                pending.entries.len()
+                            );
+                            let event = Event::FileListReceived {
+                                channel_id: pending.channel_id,
+                                path: pending.path,
+                                files: pending.entries,
+                            };
+                            let _ = self.event_tx.send(event.clone());
+                            events.push(event);
+                        }
+                    } else {
+                        log::warn!(
+                            "FileListFinished for unknown request: channel={}, path={}",
+                            channel_id,
+                            path
+                        );
+                    }
                 }
+                events
             }
             InMessage::PermOverview(ref perm) => {
-                if let Some((channel_id, ref mut perms)) = self.pending_perm_overview {
-                    for part in perm.iter() {
-                        let perm_id = part.permission_id.0;
-                        let value = part.permission_value;
-                        // Keep the best value: -1 (unlimited) wins, otherwise take max
-                        let entry = perms.entry(perm_id).or_insert(0);
-                        if *entry != -1 {
-                            if value == -1 || value > *entry {
-                                *entry = value;
-                            }
-                        }
+                let key = perm
+                    .return_code
+                    .as_ref()
+                    .and_then(|code| code.parse::<u16>().ok());
+                let fallback_cid = perm
+                    .iter()
+                    .next()
+                    .map(|part| part.channel_id.0)
+                    .unwrap_or(0);
+                let key = match key {
+                    Some(key) if self.pending_perm_overviews.contains_key(&key) => Some(key),
+                    _ if self.pending_perm_overviews.len() == 1 => {
+                        self.pending_perm_overviews.keys().next().copied()
                     }
-                    // Compute hints immediately — tsclientlib consumes the terminating
-                    // "error id=0" internally, so CommandError never fires for permoverview.
-                    let hints = compute_file_permission_hints(perms);
-                    log::info!("Channel {} permission_hints computed: {:#x} ({} perms)", channel_id, hints, perms.len());
-                    let cid = channel_id;
-                    // Clear pending state
-                    self.pending_perm_overview = None;
-                    // Update the channel in server state
-                    if let Some(ch) = self.server_state.channels.get_mut(&cid) {
-                        ch.permission_hints = hints;
+                    _ => self
+                        .pending_perm_overviews
+                        .iter()
+                        .find(|(_, pending)| pending.channel_id == fallback_cid)
+                        .map(|(key, _)| *key),
+                };
+                let Some(key) = key else {
+                    log::warn!("permoverview response without a pending request");
+                    return Vec::new();
+                };
+                let Some(mut pending) = self.pending_perm_overviews.remove(&key) else {
+                    return Vec::new();
+                };
+
+                for part in perm.iter() {
+                    let perm_id = part.permission_id.0;
+                    let value = part.permission_value;
+                    // Keep the best value: -1 (unlimited) wins, otherwise take max
+                    let entry = pending.perms.entry(perm_id).or_insert(0);
+                    if *entry != -1 && (value == -1 || value > *entry) {
+                        *entry = value;
                     }
-                    let event = Event::ChannelPermissionsUpdated { channel_id: cid, permission_hints: hints };
-                    let _ = self.event_tx.send(event.clone());
-                    return Some(event);
                 }
-                None
+
+                // Compute hints immediately — tsclientlib consumes the terminating
+                // "error id=0" internally, so CommandError never fires for permoverview.
+                let hints = compute_file_permission_hints(&pending.perms);
+                log::info!(
+                    "Channel {} permission_hints computed: {:#x} ({} perms)",
+                    pending.channel_id,
+                    hints,
+                    pending.perms.len()
+                );
+                if let Some(ch) = self.server_state.channels.get_mut(&pending.channel_id) {
+                    ch.permission_hints = hints;
+                }
+                let event = Event::ChannelPermissionsUpdated {
+                    channel_id: pending.channel_id,
+                    permission_hints: hints,
+                };
+                let _ = self.event_tx.send(event.clone());
+                vec![event]
             }
             InMessage::CommandError(ref err) => {
                 for part in err.iter() {
                     log::info!("CommandError: id={:?}, msg={}", part.id, part.message);
                 }
-                // Handle "database empty result" (1281) — server sends this when a
-                // directory has no files instead of FileListFinished.
-                if self.pending_file_list.is_some() {
-                    let is_empty_result = err.iter().any(|part| part.id == TsError::DatabaseEmptyResult);
-                    if is_empty_result {
-                        if let Some((channel_id, path, entries)) = self.pending_file_list.take() {
-                            log::info!("File list empty dir: channel={}, path={}", channel_id, path);
-                            let event = Event::FileListReceived { channel_id, path, files: entries };
-                            let _ = self.event_tx.send(event.clone());
-                            return Some(event);
-                        }
-                    }
-                }
-                // Handle permoverview failure (e.g. permission denied).
-                // Success case is handled directly in InMessage::PermOverview.
-                if self.pending_perm_overview.is_some() {
-                    let is_error = err.iter().any(|part| (part.id as u32) != 0);
-                    if is_error {
-                        if let Some((channel_id, _)) = self.pending_perm_overview.take() {
-                            log::info!("permoverview failed for channel {}, defaulting to browse/download only", channel_id);
-                            let hints = HINT_JOIN | HINT_FILE_BROWSE | HINT_FILE_DOWNLOAD;
-                            if let Some(ch) = self.server_state.channels.get_mut(&channel_id) {
-                                ch.permission_hints = hints;
-                            }
-                            let event = Event::ChannelPermissionsUpdated { channel_id, permission_hints: hints };
-                            let _ = self.event_tx.send(event.clone());
-                            return Some(event);
-                        }
-                    }
-                }
-                // Emit CommandError event for non-trivial errors (skip id=0 "ok")
+
+                let mut events = Vec::new();
                 for part in err.iter() {
                     let error_id = part.id as u32;
+                    let return_code = part
+                        .return_code
+                        .as_ref()
+                        .and_then(|code| code.parse::<u16>().ok());
+
+                    // "database empty result" (1281): empty directory instead
+                    // of FileListFinished.
+                    if part.id == TsError::DatabaseEmptyResult {
+                        if let Some(key) = return_code {
+                            if let Some(pending) = self.pending_file_lists.remove(&key) {
+                                log::info!(
+                                    "File list empty dir: channel={}, path={}",
+                                    pending.channel_id,
+                                    pending.path
+                                );
+                                let event = Event::FileListReceived {
+                                    channel_id: pending.channel_id,
+                                    path: pending.path,
+                                    files: pending.entries,
+                                };
+                                let _ = self.event_tx.send(event.clone());
+                                events.push(event);
+                            }
+                        }
+                    }
+
+                    // Failed permoverview: keep the legacy fallback hints, but
+                    // only resolve the request this error belongs to.
                     if error_id != 0 {
+                        if let Some(key) = return_code {
+                            if let Some(pending) = self.pending_perm_overviews.remove(&key) {
+                                log::info!(
+                                    "permoverview failed for channel {}, defaulting to browse/download only",
+                                    pending.channel_id
+                                );
+                                let hints = HINT_JOIN | HINT_FILE_BROWSE | HINT_FILE_DOWNLOAD;
+                                if let Some(ch) =
+                                    self.server_state.channels.get_mut(&pending.channel_id)
+                                {
+                                    ch.permission_hints = hints;
+                                }
+                                let event = Event::ChannelPermissionsUpdated {
+                                    channel_id: pending.channel_id,
+                                    permission_hints: hints,
+                                };
+                                let _ = self.event_tx.send(event.clone());
+                                events.push(event);
+                            }
+                        }
+
                         let event = Event::CommandError {
                             error_id,
                             message: part.message.clone(),
                         };
-                        let _ = self.event_tx.send(event);
+                        let _ = self.event_tx.send(event.clone());
+                        events.push(event);
                     }
                 }
-                None
+                events
             }
             _ => {
                 log::debug!("Unhandled MessageEvent: {:?}", msg.get_command_name());
-                None
+                Vec::new()
             }
         }
     }
@@ -1605,14 +1719,32 @@ impl Client {
         path: &str,
         password: Option<&str>,
     ) -> Result<()> {
+        if self
+            .pending_file_lists
+            .values()
+            .any(|pending| pending.channel_id == channel_id && pending.path == path)
+        {
+            return Err(Error::InvalidArgument(
+                "file list request already in flight".to_string(),
+            ));
+        }
         self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "ftgetfilelist");
         cmd.write_arg("cid", &channel_id);
         cmd.write_arg("cpw", &encode_channel_password(password));
         cmd.write_arg("path", &path);
-        cmd.send(con).map_err(|e| Error::Internal(e.to_string()))?;
-        self.pending_file_list = Some((channel_id, path.to_string(), Vec::new()));
+        let handle = cmd
+            .send_with_result(con)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        self.pending_file_lists.insert(
+            handle.0,
+            PendingFileList {
+                channel_id,
+                path: path.to_string(),
+                entries: Vec::new(),
+            },
+        );
         debug!("Requested file list: channel={}, path={}", channel_id, path);
         Ok(())
     }
@@ -1621,6 +1753,15 @@ impl Client {
     /// Sends `permoverview cldbid=X cid=Y` and collects responses asynchronously.
     /// Results arrive as ChannelPermissionsUpdated events.
     pub fn query_channel_permissions(&mut self, channel_id: u64) -> Result<()> {
+        if self
+            .pending_perm_overviews
+            .values()
+            .any(|pending| pending.channel_id == channel_id)
+        {
+            return Err(Error::InvalidArgument(
+                "permission request already in flight".to_string(),
+            ));
+        }
         self.ensure_connected()?;
         let con = self.connection.as_mut().ok_or(ConnectionError::NotConnected)?;
         let state = con.get_state().map_err(|e| Error::Internal(e.to_string()))?;
@@ -1632,8 +1773,16 @@ impl Client {
         cmd.write_arg("cldbid", &cldbid);
         cmd.write_arg("cid", &channel_id);
         cmd.write_arg("permid", &0u32);
-        cmd.send(con).map_err(|e| Error::Internal(e.to_string()))?;
-        self.pending_perm_overview = Some((channel_id, HashMap::new()));
+        let handle = cmd
+            .send_with_result(con)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        self.pending_perm_overviews.insert(
+            handle.0,
+            PendingPermOverview {
+                channel_id,
+                perms: HashMap::new(),
+            },
+        );
         Ok(())
     }
 
@@ -2036,6 +2185,39 @@ mod validation_tests {
         assert_ne!(encode_channel_password(Some("secret")), "secret");
     }
 
+    #[test]
+    fn duplicate_file_list_request_is_rejected() {
+        let mut client = disconnected_client();
+        client.pending_file_lists.insert(
+            1,
+            PendingFileList {
+                channel_id: 5,
+                path: "/".to_string(),
+                entries: Vec::new(),
+            },
+        );
+        assert!(matches!(
+            client.list_files(5, "/"),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_permission_request_is_rejected() {
+        let mut client = disconnected_client();
+        client.pending_perm_overviews.insert(
+            1,
+            PendingPermOverview {
+                channel_id: 5,
+                perms: HashMap::new(),
+            },
+        );
+        assert!(matches!(
+            client.query_channel_permissions(5),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+
     fn disconnected_client() -> Client {
         let config = ClientConfig::builder()
             .address("localhost:9987")
@@ -2059,8 +2241,8 @@ mod validation_tests {
             pending_downloads: HashMap::new(),
             pending_uploads: HashMap::new(),
             self_input_muted: None,
-            pending_file_list: None,
-            pending_perm_overview: None,
+            pending_file_lists: HashMap::new(),
+            pending_perm_overviews: HashMap::new(),
             pending_stream_items: VecDeque::new(),
             whisper_clients: Vec::new(),
             whisper_channels: Vec::new(),
