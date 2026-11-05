@@ -531,15 +531,17 @@ impl Client {
         });
 
         // Generate TalkStatusStop events
-        stopped_users
-            .into_iter()
-            .map(|user_id| {
-                debug!("User {} stopped talking", user_id);
-                let event = Event::TalkStatusStop { user_id };
-                let _ = self.event_tx.send(event.clone());
-                event
-            })
-            .collect()
+        let mut events = Vec::new();
+        for user_id in stopped_users {
+            debug!("User {} stopped talking", user_id);
+            if let Some(user) = self.server_state.users.get_mut(&user_id) {
+                user.is_talking = false;
+            }
+            let event = Event::TalkStatusStop { user_id };
+            let _ = self.event_tx.send(event.clone());
+            events.push(event);
+        }
+        events
     }
 
     /// Restore session-scoped state after the dependency reconnects.
@@ -762,6 +764,9 @@ impl Client {
 
                 if !was_talking {
                     // Emit TalkStatusStart — both via broadcast AND in returned events
+                    if let Some(user) = self.server_state.users.get_mut(&from_id) {
+                        user.is_talking = true;
+                    }
                     let start_event = Event::TalkStatusStart { user_id: from_id, is_whisper };
                     let _ = self.event_tx.send(start_event.clone());
                     events.push(start_event);
@@ -1010,7 +1015,8 @@ impl Client {
             PropertyId::ClientChannel(client_id) => {
                 // Client moved to a different channel
                 if let Some(ts_client) = state.clients.get(client_id) {
-                    let user = ts_client_to_user(ts_client);
+                    let mut user = ts_client_to_user(ts_client);
+                    user.is_talking = self.talking_users.contains_key(&user.id);
                     let from_channel = self.server_state.users
                         .get(&user.id)
                         .map(|u| u.channel_id)
@@ -1048,7 +1054,8 @@ impl Client {
             PropertyId::ClientIsRecording(client_id) => {
                 // Client property changed - update our state
                 if let Some(ts_client) = state.clients.get(client_id) {
-                    let user = ts_client_to_user(ts_client);
+                    let mut user = ts_client_to_user(ts_client);
+                    user.is_talking = self.talking_users.contains_key(&user.id);
                     self.server_state.users.insert(user.id, user.clone());
                     return Some(Event::UserUpdated { user });
                 }
@@ -1530,6 +1537,9 @@ impl Client {
     /// Get all users from tsclientlib state
     pub fn users(&self) -> Vec<User> {
         let mut users: Vec<User> = self.server_state.users.values().cloned().collect();
+        for user in &mut users {
+            user.is_talking = self.talking_users.contains_key(&user.id);
+        }
         // Apply local mute override for self — tsclientlib's state book
         // doesn't reflect our clientupdate, so any re-read from it will
         // have stale input_muted. We always apply our known state.
@@ -1557,12 +1567,15 @@ impl Client {
                 return Vec::new();
             }
         };
-        info!(
+        debug!(
             "users_from_connection: tsclientlib state has {} clients, {} channels",
             state.clients.len(),
             state.channels.len()
         );
         let mut users: Vec<User> = state.clients.values().map(|c| ts_client_to_user(c)).collect();
+        for user in &mut users {
+            user.is_talking = self.talking_users.contains_key(&user.id);
+        }
         // Apply local mute override (same as users())
         if let (Some(client_id), Some(muted)) = (self.client_id, self.self_input_muted) {
             if let Some(user) = users.iter_mut().find(|u| u.id == client_id) {
@@ -2483,6 +2496,24 @@ mod validation_tests {
             compute_file_permission_hints(&perms) & HINT_FILE_DOWNLOAD,
             0
         );
+    }
+
+    #[test]
+    fn users_report_talking_state() {
+        let mut client = disconnected_client();
+        client.server_state.users.insert(
+            7,
+            User {
+                id: 7,
+                nickname: "Talker".to_string(),
+                ..Default::default()
+            },
+        );
+        client.talking_users.insert(7, Instant::now());
+
+        let users = client.users();
+        assert_eq!(users.len(), 1);
+        assert!(users[0].is_talking);
     }
 
     fn disconnected_client() -> Client {
