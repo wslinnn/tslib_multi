@@ -34,6 +34,7 @@
 - 重连后重订阅频道、同步状态、恢复静音，并清空失效的 whisper 目标。
 - `User.country/description/idle_time/connected_time` 映射依赖层已有字段。
 - `ServerInfo.uid` 按服务器版本计算 SHA-1/SHA-256，banner 字段同步映射。
+- 用户离开按 reason 区分为频道踢出、服务器踢出、封禁；自己移动频道发 `ChannelJoined`。
 
 ### Fixed
 
