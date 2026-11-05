@@ -43,7 +43,7 @@ pub mod state;
 
 // Re-exports
 pub use client::{Client, FileEntry, NetworkStats};
-pub use config::ClientConfig;
+pub use config::{ClientConfig, FileTransferConfig};
 pub use connection::{Connection, ConnectionState};
 pub use error::{Error, Result};
 pub use events::{AudioCodec, Event, EventHandler};

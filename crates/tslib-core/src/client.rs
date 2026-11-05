@@ -3,7 +3,7 @@
 //! The client wraps tsclientlib's Connection and provides a higher-level API.
 //! Note: The client is not Send/Sync due to tsclientlib limitations.
 
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, FileTransferConfig};
 use crate::connection::ConnectionState;
 use crate::error::{ConnectionError, Error, Result};
 use crate::events::{AudioCodec, Event, EventHandler};
@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use futures::StreamExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tsclientlib::prelude::*;
 use tsclientlib::{Connection as TsConnection, DisconnectOptions, InMessage, PacketStat, Reason, StreamItem, ClientId, ChannelId};
 use tsclientlib::MessageTarget as TsMessageTarget;
@@ -108,11 +108,72 @@ fn validate_whisper_targets(clients: &[u16], channels: &[u64]) -> Result<()> {
     Ok(())
 }
 
+/// Read exactly `size` bytes, resetting the idle timer after every chunk.
+async fn read_exact_with_idle_timeout<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    size: u64,
+    config: &FileTransferConfig,
+) -> std::result::Result<Vec<u8>, String> {
+    let size = usize::try_from(size).map_err(|_| format!("file too large: {size} bytes"))?;
+    let mut data = Vec::with_capacity(size.min(1024 * 1024));
+    let mut buffer = vec![0u8; config.chunk_size.max(1)];
+
+    while data.len() < size {
+        let remaining = size - data.len();
+        let want = remaining.min(buffer.len());
+        let read = match config.idle_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, reader.read(&mut buffer[..want]))
+                .await
+                .map_err(|_| format!("file transfer idle timeout after {} ms", timeout.as_millis()))?,
+            None => reader.read(&mut buffer[..want]).await,
+        }
+        .map_err(|e| format!("read failed: {e}"))?;
+
+        if read == 0 {
+            return Err(format!(
+                "unexpected end of file: got {} of {} bytes",
+                data.len(),
+                size
+            ));
+        }
+        data.extend_from_slice(&buffer[..read]);
+    }
+
+    Ok(data)
+}
+
+/// Write all bytes, resetting the idle timer after every chunk.
+async fn write_all_with_idle_timeout<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    data: &[u8],
+    config: &FileTransferConfig,
+) -> std::result::Result<(), String> {
+    let chunk_size = config.chunk_size.max(1);
+    let mut written = 0;
+
+    while written < data.len() {
+        let end = (written + chunk_size).min(data.len());
+        let write = writer.write_all(&data[written..end]);
+        match config.idle_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, write)
+                .await
+                .map_err(|_| format!("file transfer idle timeout after {} ms", timeout.as_millis()))?,
+            None => write.await,
+        }
+        .map_err(|e| format!("write failed: {e}"))?;
+        written = end;
+    }
+
+    Ok(())
+}
+
 pub struct Client {
     /// The tsclientlib connection
     connection: Option<TsConnection>,
     /// Configuration
     config: ClientConfig,
+    /// File transfer limits and timeouts
+    file_transfer: FileTransferConfig,
     /// Current connection state
     state: ConnectionState,
     /// Server state (channels, users, etc.)
@@ -165,6 +226,7 @@ impl Client {
         let mut client = Self {
             connection: None,
             config: config.clone(),
+            file_transfer: FileTransferConfig::default(),
             state: ConnectionState::Disconnected,
             server_state: ServerState::default(),
             event_tx,
@@ -368,6 +430,16 @@ impl Client {
         sink: Option<Arc<dyn Fn(u16, u16, &[u8], bool) + Send + Sync>>,
     ) {
         self.audio_sink = sink;
+    }
+
+    /// Replace the file transfer limits and timeouts.
+    pub fn set_file_transfer_config(&mut self, config: FileTransferConfig) {
+        self.file_transfer = config;
+    }
+
+    /// Current file transfer limits and timeouts.
+    pub fn file_transfer_config(&self) -> &FileTransferConfig {
+        &self.file_transfer
     }
 
     /// Check for users who have stopped talking (no audio received recently)
@@ -604,16 +676,30 @@ impl Client {
                     .remove(&handle.0)
                     .unwrap_or((0, String::new()));
 
-                // Cap download size at 10MB for safety
-                let size = result.size.min(10_485_760) as usize;
-                info!("FileDownload received: path={}, size={}", path, size);
-                let mut data = vec![0u8; size];
+                let size = result.size;
+                if let Some(limit) = self.file_transfer.max_memory_download {
+                    if size > limit {
+                        let error = format!("file too large: {size} bytes (limit {limit})");
+                        warn!("File download rejected: path={}, {error}", path);
+                        let event = Event::FileTransferFailed {
+                            path: path.clone(),
+                            error,
+                        };
+                        let _ = self.event_tx.send(event.clone());
+                        return vec![event];
+                    }
+                }
 
-                // Timeout the read to avoid blocking the event loop
-                let read_timeout = tokio::time::Duration::from_secs(5);
-                match tokio::time::timeout(read_timeout, result.stream.read_exact(&mut data)).await {
-                    Ok(Ok(_)) => {
-                        info!("File downloaded: path={}, size={}", path, size);
+                info!("FileDownload received: path={}, size={}", path, size);
+                match read_exact_with_idle_timeout(
+                    &mut result.stream,
+                    size,
+                    &self.file_transfer,
+                )
+                .await
+                {
+                    Ok(data) => {
+                        info!("File downloaded: path={}, size={}", path, data.len());
                         let event = Event::FileDownloaded {
                             channel_id,
                             path,
@@ -622,21 +708,9 @@ impl Client {
                         let _ = self.event_tx.send(event.clone());
                         vec![event]
                     }
-                    Ok(Err(e)) => {
-                        warn!("File download read failed: {}", e);
-                        let event = Event::FileTransferFailed {
-                            path,
-                            error: e.to_string(),
-                        };
-                        let _ = self.event_tx.send(event.clone());
-                        vec![event]
-                    }
-                    Err(_) => {
-                        warn!("File download read timed out: path={}", path);
-                        let event = Event::FileTransferFailed {
-                            path,
-                            error: "Read timed out".to_string(),
-                        };
+                    Err(error) => {
+                        warn!("File download failed: path={}, {error}", path);
+                        let event = Event::FileTransferFailed { path, error };
                         let _ = self.event_tx.send(event.clone());
                         vec![event]
                     }
@@ -644,31 +718,47 @@ impl Client {
             }
             StreamItem::FileUpload(handle, mut result) => {
                 if let Some((channel_id, path, data)) = self.pending_uploads.remove(&handle.0) {
-                    let offset = result.seek_position as usize;
-                    let to_write = &data[offset.min(data.len())..];
-                    let write_timeout = tokio::time::Duration::from_secs(10);
-                    match tokio::time::timeout(write_timeout, result.stream.write_all(to_write)).await {
-                        Ok(Ok(_)) => {
+                    let offset = match usize::try_from(result.seek_position) {
+                        Ok(offset) if offset <= data.len() => offset,
+                        Ok(offset) => {
+                            let error = format!(
+                                "server resume offset {offset} exceeds upload size {}",
+                                data.len()
+                            );
+                            warn!("Upload rejected: path={}, {error}", path);
+                            let event = Event::FileTransferFailed { path, error };
+                            let _ = self.event_tx.send(event.clone());
+                            return vec![event];
+                        }
+                        Err(_) => {
+                            let error = format!(
+                                "server resume offset {} is too large",
+                                result.seek_position
+                            );
+                            warn!("Upload rejected: path={}, {error}", path);
+                            let event = Event::FileTransferFailed { path, error };
+                            let _ = self.event_tx.send(event.clone());
+                            return vec![event];
+                        }
+                    };
+
+                    let to_write = &data[offset..];
+                    match write_all_with_idle_timeout(
+                        &mut result.stream,
+                        to_write,
+                        &self.file_transfer,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
                             info!("Upload complete: {} ({} bytes)", path, data.len());
                             let event = Event::FileUploaded { channel_id, path };
                             let _ = self.event_tx.send(event.clone());
                             vec![event]
                         }
-                        Ok(Err(e)) => {
-                            warn!("Upload write failed: {} — {}", path, e);
-                            let event = Event::FileTransferFailed {
-                                path,
-                                error: e.to_string(),
-                            };
-                            let _ = self.event_tx.send(event.clone());
-                            vec![event]
-                        }
-                        Err(_) => {
-                            warn!("Upload write timed out: path={}", path);
-                            let event = Event::FileTransferFailed {
-                                path,
-                                error: "Write timed out".to_string(),
-                            };
+                        Err(error) => {
+                            warn!("Upload failed: {} — {}", path, error);
+                            let event = Event::FileTransferFailed { path, error };
                             let _ = self.event_tx.send(event.clone());
                             vec![event]
                         }
@@ -1846,6 +1936,7 @@ mod validation_tests {
         Client {
             connection: None,
             config,
+            file_transfer: FileTransferConfig::default(),
             state: ConnectionState::Disconnected,
             server_state: ServerState::default(),
             event_tx,
@@ -1884,5 +1975,71 @@ mod validation_tests {
             client.list_files(1, "/"),
             Err(Error::Connection(ConnectionError::NotConnected))
         ));
+    }
+
+    #[test]
+    fn file_transfer_defaults_are_bounded() {
+        let config = FileTransferConfig::default();
+        assert_eq!(config.max_memory_download, Some(64 * 1024 * 1024));
+        assert_eq!(config.idle_timeout, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(config.chunk_size, 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn reads_file_in_chunks() {
+        let data = vec![7u8; 200_000];
+        let (mut reader, mut writer) = tokio::io::duplex(8 * 1024);
+        let expected = data.clone();
+        let task = tokio::spawn(async move {
+            writer.write_all(&expected).await.unwrap();
+        });
+
+        let config = FileTransferConfig {
+            max_memory_download: None,
+            idle_timeout: Some(std::time::Duration::from_secs(1)),
+            chunk_size: 4096,
+        };
+        let read = read_exact_with_idle_timeout(&mut reader, data.len() as u64, &config)
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert_eq!(read, data);
+    }
+
+    #[tokio::test]
+    async fn read_reports_idle_timeout() {
+        let (mut reader, _writer) = tokio::io::duplex(64);
+        let config = FileTransferConfig {
+            max_memory_download: None,
+            idle_timeout: Some(std::time::Duration::from_millis(20)),
+            chunk_size: 16,
+        };
+        let error = read_exact_with_idle_timeout(&mut reader, 16, &config)
+            .await
+            .unwrap_err();
+        assert!(error.contains("idle timeout"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn writes_file_in_chunks() {
+        let data = vec![9u8; 200_000];
+        let (mut writer, mut reader) = tokio::io::duplex(8 * 1024);
+        let task = tokio::spawn(async move {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out).await.unwrap();
+            out
+        });
+
+        let config = FileTransferConfig {
+            max_memory_download: None,
+            idle_timeout: Some(std::time::Duration::from_secs(1)),
+            chunk_size: 4096,
+        };
+        write_all_with_idle_timeout(&mut writer, &data, &config)
+            .await
+            .unwrap();
+        drop(writer);
+        let written = task.await.unwrap();
+        assert_eq!(written, data);
     }
 }

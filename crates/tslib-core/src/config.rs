@@ -208,6 +208,41 @@ impl ClientConfig {
     }
 }
 
+/// File transfer limits and timeouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileTransferConfig {
+    /// Maximum size of a file downloaded into memory. `None` disables the
+    /// limit and should only be used when the caller can bound memory itself.
+    pub max_memory_download: Option<u64>,
+    /// Maximum time without progress while reading or writing a transfer.
+    /// `None` disables the idle timeout.
+    pub idle_timeout: Option<Duration>,
+    /// Chunk size used for streaming reads and writes.
+    pub chunk_size: usize,
+}
+
+impl Default for FileTransferConfig {
+    fn default() -> Self {
+        Self {
+            max_memory_download: Some(64 * 1024 * 1024),
+            idle_timeout: Some(Duration::from_secs(30)),
+            chunk_size: 64 * 1024,
+        }
+    }
+}
+
+impl FileTransferConfig {
+    /// Create a configuration with no memory limit, no idle timeout, and the
+    /// default chunk size.
+    pub fn unlimited() -> Self {
+        Self {
+            max_memory_download: None,
+            idle_timeout: None,
+            chunk_size: Self::default().chunk_size,
+        }
+    }
+}
+
 // Helper module for Duration serialization
 #[allow(dead_code)]
 mod humantime_serde {
