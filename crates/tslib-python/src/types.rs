@@ -351,6 +351,71 @@ pub fn event_to_dict<'py>(py: Python<'py>, event: &tslib_core::events::Event) ->
             let _ = dict.set_item("path", path.as_str());
             let _ = dict.set_item("error", error.as_str());
         }
+        Event::FileDownloadedToPath {
+            channel_id,
+            path,
+            destination,
+            size,
+        } => {
+            let _ = dict.set_item("type", "file_downloaded_to_path");
+            let _ = dict.set_item("channel_id", channel_id);
+            let _ = dict.set_item("path", path.as_str());
+            let _ = dict.set_item("destination", destination.as_str());
+            let _ = dict.set_item("size", size);
+        }
+        Event::FileInfoReceived {
+            channel_id,
+            path,
+            size,
+            datetime,
+            is_file,
+        } => {
+            let _ = dict.set_item("type", "file_info_received");
+            let _ = dict.set_item("channel_id", channel_id);
+            let _ = dict.set_item("path", path.as_str());
+            let _ = dict.set_item("size", size);
+            let _ = dict.set_item("datetime", datetime);
+            let _ = dict.set_item("is_file", is_file);
+        }
+        Event::FileTransfersListed { transfers } => {
+            let _ = dict.set_item("type", "file_transfers_listed");
+            let entries = PyList::empty(py);
+            for transfer in transfers {
+                let entry = PyDict::new(py);
+                let _ = entry.set_item("client_id", transfer.client_id);
+                let _ = entry.set_item("path", transfer.path.as_str());
+                let _ = entry.set_item("name", transfer.name.as_str());
+                let _ = entry.set_item("size", transfer.size);
+                let _ = entry.set_item("size_done", transfer.size_done);
+                let _ = entry.set_item(
+                    "client_filetransfer_id",
+                    transfer.client_filetransfer_id,
+                );
+                let _ = entry.set_item(
+                    "server_filetransfer_id",
+                    transfer.server_filetransfer_id,
+                );
+                let _ = entry.set_item("sender", transfer.sender);
+                let _ = entry.set_item("status", transfer.status);
+                let _ = entry.set_item("current_speed", transfer.current_speed);
+                let _ = entry.set_item("average_speed", transfer.average_speed);
+                let _ = entry.set_item("runtime_secs", transfer.runtime_secs);
+                let _ = entries.append(entry);
+            }
+            let _ = dict.set_item("transfers", entries);
+        }
+        Event::FileTransferStopped {
+            client_filetransfer_id,
+            status,
+            message,
+            size,
+        } => {
+            let _ = dict.set_item("type", "file_transfer_stopped");
+            let _ = dict.set_item("client_filetransfer_id", client_filetransfer_id);
+            let _ = dict.set_item("status", status);
+            let _ = dict.set_item("message", message.as_str());
+            let _ = dict.set_item("size", size);
+        }
         Event::FileUploaded { channel_id, path } => {
             let _ = dict.set_item("type", "file_uploaded");
             let _ = dict.set_item("channel_id", channel_id);

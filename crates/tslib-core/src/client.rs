@@ -9,6 +9,8 @@ use crate::error::{ConnectionError, Error, Result};
 use crate::events::{AudioCodec, Event, EventHandler};
 use crate::state::{Channel, MaxClientsKind, PermissionHints, ServerInfo, ServerState, User};
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::io::SeekFrom;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -17,7 +19,9 @@ use tracing::{debug, info, warn};
 use base64::Engine as _;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
+};
 use tsclientlib::prelude::*;
 use tsclientlib::{Connection as TsConnection, DisconnectOptions, InMessage, PacketStat, Reason, StreamItem, ClientId, ChannelId};
 use tsclientlib::MessageTarget as TsMessageTarget;
@@ -102,8 +106,28 @@ struct PendingPermOverview {
 struct PendingUpload {
     channel_id: u64,
     path: String,
-    data: Vec<u8>,
+    size: u64,
+    source: UploadSource,
     password: Option<String>,
+}
+
+enum UploadSource {
+    Memory(Vec<u8>),
+    File(PathBuf),
+}
+
+/// In-flight download; `destination` writes to disk instead of memory.
+struct PendingDownload {
+    channel_id: u64,
+    path: String,
+    destination: Option<PathBuf>,
+    offset: u64,
+}
+
+/// In-flight public `ftgetfileinfo` query.
+struct PendingFileInfoQuery {
+    channel_id: u64,
+    path: String,
 }
 
 /// In-flight `ftgetfileinfo` verification, keyed by the server return code.
@@ -220,6 +244,123 @@ async fn write_all_with_idle_timeout<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Copy exactly `size` bytes from a TCP stream into a local file.
+async fn copy_stream_to_file<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    size: u64,
+    destination: &Path,
+    offset: u64,
+    config: &FileTransferConfig,
+) -> std::result::Result<u64, String> {
+    use tokio::fs::OpenOptions;
+
+    let mut file = if offset == 0 {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(destination)
+            .await
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(destination)
+            .await
+    }
+    .map_err(|e| format!("open {} failed: {e}", destination.display()))?;
+
+    let chunk = config.chunk_size.max(1);
+    let mut buffer = vec![0u8; chunk];
+    let mut remaining = size;
+    let mut written = 0u64;
+
+    while remaining > 0 {
+        let want = remaining.min(chunk as u64) as usize;
+        let read = match config.idle_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, stream.read(&mut buffer[..want]))
+                .await
+                .map_err(|_| {
+                    format!(
+                        "file transfer idle timeout after {} ms",
+                        timeout.as_millis()
+                    )
+                })?,
+            None => stream.read(&mut buffer[..want]).await,
+        }
+        .map_err(|e| format!("read failed: {e}"))?;
+
+        if read == 0 {
+            return Err(format!(
+                "unexpected end of file: got {written} of {size} bytes"
+            ));
+        }
+        file.write_all(&buffer[..read])
+            .await
+            .map_err(|e| format!("write {} failed: {e}", destination.display()))?;
+        remaining -= read as u64;
+        written += read as u64;
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("flush {} failed: {e}", destination.display()))?;
+    Ok(written)
+}
+
+/// Copy a local file (starting at `offset`) into a TCP stream.
+async fn copy_file_to_stream<W: AsyncWrite + Unpin>(
+    source: &Path,
+    offset: u64,
+    size: u64,
+    stream: &mut W,
+    config: &FileTransferConfig,
+) -> std::result::Result<(), String> {
+    let mut file = tokio::fs::File::open(source)
+        .await
+        .map_err(|e| format!("open {} failed: {e}", source.display()))?;
+    if offset > 0 {
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|e| format!("seek {} failed: {e}", source.display()))?;
+    }
+
+    let chunk = config.chunk_size.max(1);
+    let mut buffer = vec![0u8; chunk];
+    let mut remaining = size.saturating_sub(offset);
+
+    while remaining > 0 {
+        let want = remaining.min(chunk as u64) as usize;
+        let read = file
+            .read(&mut buffer[..want])
+            .await
+            .map_err(|e| format!("read {} failed: {e}", source.display()))?;
+        if read == 0 {
+            return Err(format!(
+                "upload source ended early: {} bytes still expected",
+                remaining
+            ));
+        }
+
+        let write = stream.write_all(&buffer[..read]);
+        match config.idle_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, write)
+                .await
+                .map_err(|_| {
+                    format!(
+                        "file transfer idle timeout after {} ms",
+                        timeout.as_millis()
+                    )
+                })?,
+            None => write.await,
+        }
+        .map_err(|e| format!("write failed: {e}"))?;
+        remaining -= read as u64;
+    }
+
+    Ok(())
+}
+
 pub struct Client {
     /// The tsclientlib connection
     connection: Option<TsConnection>,
@@ -248,11 +389,13 @@ pub struct Client {
     /// talking user on each event pump (PR-03).
     talk_deadlines: BTreeSet<(Instant, u16)>,
     /// Pending file downloads: FiletransferHandle id -> (channel_id, path)
-    pending_downloads: HashMap<u16, (u64, String)>,
+    pending_downloads: HashMap<u16, PendingDownload>,
     /// Pending file uploads: FiletransferHandle id -> upload state
     pending_uploads: HashMap<u16, PendingUpload>,
     /// Pending upload size verifications: return code -> request state
     pending_file_infos: HashMap<u16, PendingFileInfo>,
+    /// Pending public file-info queries: return code -> request state
+    pending_file_info_queries: HashMap<u16, PendingFileInfoQuery>,
     /// Local override for our own input muted state.
     /// tsclientlib's state book doesn't reflect our clientupdate commands
     /// (the server doesn't echo them back), so we track it separately.
@@ -309,6 +452,7 @@ impl Client {
             pending_downloads: HashMap::new(),
             pending_uploads: HashMap::new(),
             pending_file_infos: HashMap::new(),
+            pending_file_info_queries: HashMap::new(),
             self_input_muted: None,
             pending_file_lists: HashMap::new(),
             pending_perm_overviews: HashMap::new(),
@@ -894,48 +1038,101 @@ impl Client {
                 self.process_message_event(msg)
             }
             StreamItem::FileDownload(handle, mut result) => {
-                let (channel_id, path) = self
+                let pending = self
                     .pending_downloads
                     .remove(&handle.0)
-                    .unwrap_or((0, String::new()));
+                    .unwrap_or(PendingDownload {
+                        channel_id: 0,
+                        path: String::new(),
+                        destination: None,
+                        offset: 0,
+                    });
+                let PendingDownload {
+                    channel_id,
+                    path,
+                    destination,
+                    offset,
+                } = pending;
 
                 let size = result.size;
-                if let Some(limit) = self.file_transfer.max_memory_download {
-                    if size > limit {
-                        let error = format!("file too large: {size} bytes (limit {limit})");
-                        warn!("File download rejected: path={}, {error}", path);
-                        let event = Event::FileTransferFailed {
-                            path: path.clone(),
-                            error,
-                        };
-                        let _ = self.event_tx.send(event.clone());
-                        return vec![event];
+                if destination.is_none() {
+                    if let Some(limit) = self.file_transfer.max_memory_download {
+                        if size > limit {
+                            let error = format!("file too large: {size} bytes (limit {limit})");
+                            warn!("File download rejected: path={}, {error}", path);
+                            let event = Event::FileTransferFailed {
+                                path: path.clone(),
+                                error,
+                            };
+                            let _ = self.event_tx.send(event.clone());
+                            return vec![event];
+                        }
                     }
                 }
 
-                info!("FileDownload received: path={}, size={}", path, size);
-                match read_exact_with_idle_timeout(
-                    &mut result.stream,
-                    size,
-                    &self.file_transfer,
-                )
-                .await
-                {
-                    Ok(data) => {
-                        info!("File downloaded: path={}, size={}", path, data.len());
-                        let event = Event::FileDownloaded {
-                            channel_id,
-                            path,
-                            data,
-                        };
-                        let _ = self.event_tx.send(event.clone());
-                        vec![event]
+                info!(
+                    "FileDownload received: path={}, size={}, destination={:?}",
+                    path, size, destination
+                );
+
+                if let Some(destination) = destination {
+                    let remaining = size.saturating_sub(offset);
+                    match copy_stream_to_file(
+                        &mut result.stream,
+                        remaining,
+                        &destination,
+                        offset,
+                        &self.file_transfer,
+                    )
+                    .await
+                    {
+                        Ok(written) => {
+                            info!(
+                                "File downloaded to path: {} -> {} ({} bytes)",
+                                path,
+                                destination.display(),
+                                written
+                            );
+                            let event = Event::FileDownloadedToPath {
+                                channel_id,
+                                path,
+                                destination: destination.to_string_lossy().into_owned(),
+                                size: written,
+                            };
+                            let _ = self.event_tx.send(event.clone());
+                            vec![event]
+                        }
+                        Err(error) => {
+                            warn!("File download failed: path={}, {error}", path);
+                            let event = Event::FileTransferFailed { path, error };
+                            let _ = self.event_tx.send(event.clone());
+                            vec![event]
+                        }
                     }
-                    Err(error) => {
-                        warn!("File download failed: path={}, {error}", path);
-                        let event = Event::FileTransferFailed { path, error };
-                        let _ = self.event_tx.send(event.clone());
-                        vec![event]
+                } else {
+                    match read_exact_with_idle_timeout(
+                        &mut result.stream,
+                        size,
+                        &self.file_transfer,
+                    )
+                    .await
+                    {
+                        Ok(data) => {
+                            info!("File downloaded: path={}, size={}", path, data.len());
+                            let event = Event::FileDownloaded {
+                                channel_id,
+                                path,
+                                data,
+                            };
+                            let _ = self.event_tx.send(event.clone());
+                            vec![event]
+                        }
+                        Err(error) => {
+                            warn!("File download failed: path={}, {error}", path);
+                            let event = Event::FileTransferFailed { path, error };
+                            let _ = self.event_tx.send(event.clone());
+                            vec![event]
+                        }
                     }
                 }
             }
@@ -944,43 +1141,46 @@ impl Client {
                     let PendingUpload {
                         channel_id,
                         path,
-                        data,
+                        size,
+                        source,
                         password,
                     } = upload;
-                    let offset = match usize::try_from(result.seek_position) {
-                        Ok(offset) if offset <= data.len() => offset,
-                        Ok(offset) => {
-                            let error = format!(
-                                "server resume offset {offset} exceeds upload size {}",
-                                data.len()
-                            );
-                            warn!("Upload rejected: path={}, {error}", path);
-                            let event = Event::FileTransferFailed { path, error };
-                            let _ = self.event_tx.send(event.clone());
-                            return vec![event];
+                    let offset = result.seek_position;
+                    if offset > size {
+                        let error = format!(
+                            "server resume offset {offset} exceeds upload size {size}"
+                        );
+                        warn!("Upload rejected: path={}, {error}", path);
+                        let event = Event::FileTransferFailed { path, error };
+                        let _ = self.event_tx.send(event.clone());
+                        return vec![event];
+                    }
+
+                    let written = match source {
+                        UploadSource::Memory(data) => {
+                            let to_write = &data[offset as usize..];
+                            write_all_with_idle_timeout(
+                                &mut result.stream,
+                                to_write,
+                                &self.file_transfer,
+                            )
+                            .await
                         }
-                        Err(_) => {
-                            let error = format!(
-                                "server resume offset {} is too large",
-                                result.seek_position
-                            );
-                            warn!("Upload rejected: path={}, {error}", path);
-                            let event = Event::FileTransferFailed { path, error };
-                            let _ = self.event_tx.send(event.clone());
-                            return vec![event];
+                        UploadSource::File(source_path) => {
+                            copy_file_to_stream(
+                                &source_path,
+                                offset,
+                                size,
+                                &mut result.stream,
+                                &self.file_transfer,
+                            )
+                            .await
                         }
                     };
 
-                    let to_write = &data[offset..];
-                    match write_all_with_idle_timeout(
-                        &mut result.stream,
-                        to_write,
-                        &self.file_transfer,
-                    )
-                    .await
-                    {
+                    match written {
                         Ok(()) => {
-                            info!("Upload complete: {} ({} bytes)", path, data.len());
+                            info!("Upload complete: {} ({} bytes)", path, size);
                             // Ask the server to confirm the size it persisted.
                             // The FileUploaded event is emitted when the
                             // ftgetfileinfo response arrives, or immediately if
@@ -988,7 +1188,7 @@ impl Client {
                             self.verify_uploaded_file(
                                 channel_id,
                                 &path,
-                                data.len() as u64,
+                                size,
                                 password.as_deref(),
                             )
                         }
@@ -1008,6 +1208,7 @@ impl Client {
                 let (_channel_id, path) = self
                     .pending_downloads
                     .remove(&handle.0)
+                    .map(|download| (download.channel_id, download.path))
                     .or_else(|| {
                         self.pending_uploads
                             .remove(&handle.0)
@@ -1499,6 +1700,37 @@ impl Client {
                     .return_code
                     .as_ref()
                     .and_then(|code| code.parse::<u16>().ok());
+
+                // Public `ftgetfileinfo` query (not upload verification).
+                let query_key = match key {
+                    Some(key) if self.pending_file_info_queries.contains_key(&key) => Some(key),
+                    _ => info.iter().next().and_then(|part| {
+                        self.pending_file_info_queries
+                            .iter()
+                            .find(|(_, pending)| {
+                                pending.channel_id == part.channel_id.0
+                                    && (pending.path == part.name
+                                        || pending.path.ends_with(&format!("/{}", part.name)))
+                            })
+                            .map(|(key, _)| *key)
+                    }),
+                };
+                if let Some(key) = query_key {
+                    if let Some(query) = self.pending_file_info_queries.remove(&key) {
+                        if let Some(part) = info.iter().next() {
+                            let event = Event::FileInfoReceived {
+                                channel_id: query.channel_id,
+                                path: query.path,
+                                size: part.size,
+                                datetime: part.date_time.unix_timestamp(),
+                                is_file: true,
+                            };
+                            let _ = self.event_tx.send(event.clone());
+                            return vec![event];
+                        }
+                    }
+                }
+
                 let key = match key {
                     Some(key) if self.pending_file_infos.contains_key(&key) => Some(key),
                     _ => info.iter().next().and_then(|part| {
@@ -1557,6 +1789,42 @@ impl Client {
                         vec![event]
                     }
                 }
+            }
+            InMessage::Filetransfer(ref list) => {
+                let transfers = list
+                    .iter()
+                    .map(|part| crate::events::FileTransferInfo {
+                        client_id: part.client_id.0,
+                        path: part.path.clone(),
+                        name: part.name.clone(),
+                        size: part.size,
+                        size_done: part.size_done,
+                        client_filetransfer_id: part.client_filetransfer_id,
+                        server_filetransfer_id: part.server_filetransfer_id,
+                        sender: part.sender,
+                        status: part.status,
+                        current_speed: part.current_speed,
+                        average_speed: part.average_speed,
+                        runtime_secs: part.runtime.whole_seconds().max(0) as u64,
+                    })
+                    .collect();
+                let event = Event::FileTransfersListed { transfers };
+                let _ = self.event_tx.send(event.clone());
+                vec![event]
+            }
+            InMessage::FiletransferStatus(ref status) => {
+                let mut events = Vec::new();
+                for part in status.iter() {
+                    let event = Event::FileTransferStopped {
+                        client_filetransfer_id: part.client_filetransfer_id,
+                        status: part.status as u32,
+                        message: part.message.clone(),
+                        size: part.size,
+                    };
+                    let _ = self.event_tx.send(event.clone());
+                    events.push(event);
+                }
+                events
             }
             InMessage::CommandError(ref err) => {
                 for part in err.iter() {
@@ -2114,20 +2382,74 @@ impl Client {
         path: &str,
         password: Option<&str>,
     ) -> Result<()> {
+        self.start_download(channel_id, path, password, None, 0)
+    }
+
+    /// Download a file directly to a path, without buffering it in memory.
+    ///
+    /// `offset` resumes a partial download: the file is opened in append mode
+    /// and the server is asked to seek to that position.
+    pub fn download_file_to_path(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        destination: impl AsRef<Path>,
+        offset: u64,
+    ) -> Result<()> {
+        self.download_file_to_path_with_password(channel_id, path, destination, None, offset)
+    }
+
+    /// Password-protected path download with resume support.
+    pub fn download_file_to_path_with_password(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        destination: impl AsRef<Path>,
+        password: Option<&str>,
+        offset: u64,
+    ) -> Result<()> {
+        self.start_download(
+            channel_id,
+            path,
+            password,
+            Some(destination.as_ref().to_path_buf()),
+            offset,
+        )
+    }
+
+    fn start_download(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        password: Option<&str>,
+        destination: Option<PathBuf>,
+        offset: u64,
+    ) -> Result<()> {
         self.ensure_connected()?;
         let con = self
             .connection
             .as_mut()
             .ok_or(ConnectionError::NotConnected)?;
 
+        let seek = if offset == 0 { None } else { Some(offset) };
         let handle = con
-            .download_file(ChannelId(channel_id), path, password, None)
+            .download_file(ChannelId(channel_id), path, password, seek)
             .map_err(|e| Error::Internal(e.to_string()))?;
 
-        self.pending_downloads
-            .insert(handle.0, (channel_id, path.to_string()));
+        self.pending_downloads.insert(
+            handle.0,
+            PendingDownload {
+                channel_id,
+                path: path.to_string(),
+                destination,
+                offset,
+            },
+        );
 
-        debug!("Started download: channel={}, path={}", channel_id, path);
+        debug!(
+            "Started download: channel={}, path={}, offset={}",
+            channel_id, path, offset
+        );
         Ok(())
     }
 
@@ -2153,10 +2475,77 @@ impl Client {
         self.pending_uploads.insert(handle.0, PendingUpload {
             channel_id,
             path: path.to_string(),
-            data: data.to_vec(),
+            size: data.len() as u64,
+            source: UploadSource::Memory(data.to_vec()),
             password: password.map(str::to_string),
         });
         debug!("Started upload: channel={}, path={}, size={}", channel_id, path, data.len());
+        Ok(())
+    }
+
+    /// Upload a file from disk without reading it into memory.
+    pub fn upload_file_from_path(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        source: impl AsRef<Path>,
+        overwrite: bool,
+    ) -> Result<()> {
+        self.upload_file_from_path_with_password(
+            channel_id,
+            path,
+            source,
+            overwrite,
+            None,
+            false,
+        )
+    }
+
+    /// Password-protected path upload with optional server-side resume.
+    pub fn upload_file_from_path_with_password(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        source: impl AsRef<Path>,
+        overwrite: bool,
+        password: Option<&str>,
+        resume: bool,
+    ) -> Result<()> {
+        let source = source.as_ref().to_path_buf();
+        let size = std::fs::metadata(&source)
+            .map_err(|error| Error::InvalidArgument(format!("cannot stat upload source: {error}")))?
+            .len();
+
+        self.ensure_connected()?;
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or(ConnectionError::NotConnected)?;
+        let handle = con
+            .upload_file(
+                ChannelId(channel_id),
+                path,
+                password,
+                size,
+                overwrite,
+                resume,
+            )
+            .map_err(|e| Error::Internal(e.to_string()))?;
+
+        self.pending_uploads.insert(
+            handle.0,
+            PendingUpload {
+                channel_id,
+                path: path.to_string(),
+                size,
+                source: UploadSource::File(source),
+                password: password.map(str::to_string),
+            },
+        );
+        debug!(
+            "Started path upload: channel={}, path={}, size={}, resume={}",
+            channel_id, path, size, resume
+        );
         Ok(())
     }
 
@@ -2218,6 +2607,86 @@ impl Client {
                 vec![event]
             }
         }
+    }
+
+    /// Request metadata for one file on the server.
+    ///
+    /// The result arrives as `Event::FileInfoReceived`.
+    pub fn get_file_info(&mut self, channel_id: u64, path: &str) -> Result<()> {
+        self.ensure_connected()?;
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or(ConnectionError::NotConnected)?;
+        let mut cmd = OutCommand::new(
+            Direction::C2S,
+            Flags::empty(),
+            PacketType::Command,
+            "ftgetfileinfo",
+        );
+        cmd.write_arg("cid", &channel_id);
+        cmd.write_arg("cpw", &"");
+        cmd.write_arg("name", &path);
+        let handle = cmd
+            .send_with_result(con)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        self.pending_file_info_queries.insert(
+            handle.0,
+            PendingFileInfoQuery {
+                channel_id,
+                path: path.to_string(),
+            },
+        );
+        debug!("Requested file info: channel={}, path={}", channel_id, path);
+        Ok(())
+    }
+
+    /// List active file transfers (`ftlist`).
+    ///
+    /// The result arrives as `Event::FileTransfersListed`.
+    pub fn list_file_transfers(&mut self) -> Result<()> {
+        self.ensure_connected()?;
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or(ConnectionError::NotConnected)?;
+        let cmd = OutCommand::new(
+            Direction::C2S,
+            Flags::empty(),
+            PacketType::Command,
+            "ftlist",
+        );
+        cmd.send(con)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Stop a file transfer (`ftstop`).
+    ///
+    /// The result arrives as `Event::FileTransferStopped`.
+    pub fn stop_file_transfer(
+        &mut self,
+        server_filetransfer_id: u16,
+        client_filetransfer_id: u16,
+        delete: bool,
+    ) -> Result<()> {
+        self.ensure_connected()?;
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or(ConnectionError::NotConnected)?;
+        let mut cmd = OutCommand::new(
+            Direction::C2S,
+            Flags::empty(),
+            PacketType::Command,
+            "ftstop",
+        );
+        cmd.write_arg("serverftfid", &server_filetransfer_id);
+        cmd.write_arg("clientftfid", &client_filetransfer_id);
+        cmd.write_arg("delete", &(delete as u8));
+        cmd.send(con)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(())
     }
 
     /// Request the file list for a channel directory
@@ -3006,6 +3475,7 @@ mod validation_tests {
             pending_downloads: HashMap::new(),
             pending_uploads: HashMap::new(),
             pending_file_infos: HashMap::new(),
+            pending_file_info_queries: HashMap::new(),
             self_input_muted: None,
             pending_file_lists: HashMap::new(),
             pending_perm_overviews: HashMap::new(),
@@ -3105,5 +3575,64 @@ mod validation_tests {
         drop(writer);
         let written = task.await.unwrap();
         assert_eq!(written, data);
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "tslib-{name}-{}-{nanos}.bin",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn copy_stream_to_file_writes_exact_bytes() {
+        let path = temp_path("download");
+        let mut input: &[u8] = b"hello world";
+        let config = FileTransferConfig::default();
+
+        let written = copy_stream_to_file(&mut input, 11, &path, 0, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(written, 11);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn copy_stream_to_file_appends_at_offset() {
+        let path = temp_path("resume");
+        std::fs::write(&path, b"hello ").unwrap();
+        let mut input: &[u8] = b"world";
+        let config = FileTransferConfig::default();
+
+        copy_stream_to_file(&mut input, 5, &path, 6, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn copy_file_to_stream_respects_offset() {
+        let path = temp_path("upload");
+        std::fs::write(&path, b"hello world").unwrap();
+        let config = FileTransferConfig::default();
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+
+        copy_file_to_stream(&path, 6, 11, &mut writer, &config)
+            .await
+            .unwrap();
+        drop(writer);
+
+        let mut uploaded = Vec::new();
+        reader.read_to_end(&mut uploaded).await.unwrap();
+        assert_eq!(uploaded, b"world");
+        let _ = std::fs::remove_file(&path);
     }
 }

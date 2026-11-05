@@ -394,6 +394,72 @@ pub fn create_java_event<'a>(
             );
             "file_downloaded"
         }
+        Event::FileDownloadedToPath {
+            channel_id,
+            path,
+            destination,
+            size,
+        } => {
+            put_long(env, &map, "channel_id", *channel_id as i64);
+            put_string(env, &map, "path", path);
+            put_string(env, &map, "destination", destination);
+            put_long(env, &map, "size", *size as i64);
+            "file_downloaded_to_path"
+        }
+        Event::FileInfoReceived {
+            channel_id,
+            path,
+            size,
+            datetime,
+            is_file,
+        } => {
+            put_long(env, &map, "channel_id", *channel_id as i64);
+            put_string(env, &map, "path", path);
+            put_long(env, &map, "size", *size as i64);
+            put_long(env, &map, "datetime", *datetime);
+            put_boolean(env, &map, "is_file", *is_file);
+            "file_info_received"
+        }
+        Event::FileTransfersListed { transfers } => {
+            let values: Vec<serde_json::Value> = transfers
+                .iter()
+                .map(|transfer| {
+                    serde_json::json!({
+                        "client_id": transfer.client_id,
+                        "path": transfer.path,
+                        "name": transfer.name,
+                        "size": transfer.size,
+                        "size_done": transfer.size_done,
+                        "client_filetransfer_id": transfer.client_filetransfer_id,
+                        "server_filetransfer_id": transfer.server_filetransfer_id,
+                        "sender": transfer.sender,
+                        "status": transfer.status,
+                        "current_speed": transfer.current_speed,
+                        "average_speed": transfer.average_speed,
+                        "runtime_secs": transfer.runtime_secs,
+                    })
+                })
+                .collect();
+            put_string(
+                env,
+                &map,
+                "transfers",
+                &serde_json::Value::Array(values).to_string(),
+            );
+            "file_transfers_listed"
+        }
+        Event::FileTransferStopped {
+            client_filetransfer_id,
+            status,
+            message,
+            size,
+        } => {
+            put_int(env, &map, "client_filetransfer_id", *client_filetransfer_id as i32);
+            put_long(env, &map, "status", *status as i64);
+            put_string(env, &map, "message", message);
+            put_long(env, &map, "size", *size as i64);
+            "file_transfer_stopped"
+        }
         Event::FileUploaded { channel_id, path } => {
             put_long(env, &map, "channel_id", *channel_id as i64);
             put_string(env, &map, "path", path);

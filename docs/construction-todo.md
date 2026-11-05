@@ -98,16 +98,16 @@
 
 ## C3. 文件传输
 
-- [ ] **C3-1 FR-FS-03 路径式流式/续传**
+- [x] **C3-1 FR-FS-03 路径式流式/续传**
   - `download_file_to_path(channel, path, dest, offset)` / `upload_file_from_path(...)`。
   - 支持 resume/seek；大文件不整块进内存；idle timeout 沿用。
   - 验收：>64 MiB 文件可下载/上传；断点续传可用。
 
-- [ ] **C3-2 文件命令补齐**
+- [x] **C3-2 文件命令补齐**
   - 公开 `ftstop`、`ftlist`、`ftgetfileinfo`（当前仅内部上传校验）。
   - 验收：可停止传输、查询传输列表与单文件信息。
 
-- [ ] **C3-3 文件集成测试**
+- [x] **C3-3 文件集成测试**
   - 覆盖密码频道、并发列表、上传校验、续传、失败回滚。
 
 ---

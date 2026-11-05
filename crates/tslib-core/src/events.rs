@@ -7,6 +7,23 @@ use crate::state::{Channel, User};
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// A file transfer reported by `ftlist`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileTransferInfo {
+    pub client_id: u16,
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+    pub size_done: i64,
+    pub client_filetransfer_id: u16,
+    pub server_filetransfer_id: u16,
+    pub sender: u64,
+    pub status: i32,
+    pub current_speed: f32,
+    pub average_speed: f32,
+    pub runtime_secs: u64,
+}
+
 /// Events that can be emitted by the client
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -140,6 +157,32 @@ pub enum Event {
         channel_id: u64,
         path: String,
         data: Vec<u8>,
+    },
+    /// A file download completed directly into a local path
+    FileDownloadedToPath {
+        channel_id: u64,
+        path: String,
+        destination: String,
+        size: u64,
+    },
+    /// Response to a public `ftgetfileinfo` query
+    FileInfoReceived {
+        channel_id: u64,
+        path: String,
+        size: u64,
+        datetime: i64,
+        is_file: bool,
+    },
+    /// Response to `ftlist`
+    FileTransfersListed {
+        transfers: Vec<FileTransferInfo>,
+    },
+    /// Response to `ftstop`
+    FileTransferStopped {
+        client_filetransfer_id: u16,
+        status: u32,
+        message: String,
+        size: u64,
     },
     /// A file upload completed successfully
     FileUploaded {

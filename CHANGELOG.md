@@ -46,6 +46,9 @@
 - FFI 新增 `tslib_actor_*`（连接、pump、命令结果、状态、语音丢弃计数）。
 - Java 新增 `ActorClient`（命令结果 + `pumpEvents`），旧 `Client` 保持兼容。
 - Python `Client` 改为 actor 后端：构造函数完成连接，`process_events` 非阻塞，新增 `wait_events`。
+- `Client::download_file_to_path(_with_password)` / `upload_file_from_path(_with_password)`：路径式流式传输，支持 offset/resume。
+- `Client::get_file_info`、`list_file_transfers`、`stop_file_transfer` 公开 `ftgetfileinfo`/`ftlist`/`ftstop`。
+- 新事件 `FileDownloadedToPath`、`FileInfoReceived`、`FileTransfersListed`、`FileTransferStopped`。
 
 ### Changed
 
