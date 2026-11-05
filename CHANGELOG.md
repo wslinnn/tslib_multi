@@ -35,6 +35,9 @@
 - `User.country/description/idle_time/connected_time` 映射依赖层已有字段。
 - `ServerInfo.uid` 按服务器版本计算 SHA-1/SHA-256，banner 字段同步映射。
 - 用户离开按 reason 区分为频道踢出、服务器踢出、封禁；自己移动频道发 `ChannelJoined`。
+- 文件权限缺失不再默认允许；权限查询失败只保留 join hint。
+- `User.is_talking` 随音频与 TalkStatus 维护。
+- 逐事件/逐文件/权限计算日志从 info 降到 debug，降低热路径开销。
 
 ### Fixed
 
