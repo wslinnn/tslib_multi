@@ -8,7 +8,7 @@ use crate::connection::ConnectionState;
 use crate::error::{ConnectionError, Error, Result};
 use crate::events::{AudioCodec, Event, EventHandler};
 use crate::state::{Channel, ServerInfo, ServerState, User};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
@@ -203,6 +203,10 @@ pub struct Client {
     /// Pending permoverview request: accumulates permission entries
     /// (channel_id, HashMap<permission_id, max_value>)
     pending_perm_overview: Option<(u64, HashMap<u32, i32>)>,
+    /// Stream items received during `wait_connected` that were not the
+    /// BookEvents it waits for. They are processed by the next event pump
+    /// call so messages/audio from the connection handshake are not lost.
+    pending_stream_items: VecDeque<StreamItem>,
     /// Active whisper targets. When non-empty, `send_audio` routes voice as
     /// `C2SWhisper` to these targets instead of the current channel (TS3
     /// semantics: whispering and channel talk are mutually exclusive).
@@ -240,6 +244,7 @@ impl Client {
             self_input_muted: None,
             pending_file_list: None,
             pending_perm_overview: None,
+            pending_stream_items: VecDeque::new(),
             whisper_clients: Vec::new(),
             whisper_channels: Vec::new(),
             audio_sink: None,
@@ -294,8 +299,11 @@ impl Client {
     /// This method must be called regularly to receive server events.
     /// Returns a vector of events that occurred.
     pub async fn process_events(&mut self) -> Result<Vec<Event>> {
+        if self.connection.is_none() {
+            return Err(ConnectionError::NotConnected.into());
+        }
         let mut events = Vec::new();
-        let mut stream_items = Vec::new();
+        let mut stream_items: Vec<StreamItem> = self.pending_stream_items.drain(..).collect();
         let mut disconnected = false;
 
         // First, collect all pending stream items
@@ -363,8 +371,11 @@ impl Client {
     /// coalesced for a short grace window so a burst returns in one batch.
     /// This replaces sleep-then-poll loops on the embedding side.
     pub async fn wait_events(&mut self, timeout_ms: u64) -> Result<Vec<Event>> {
+        if self.connection.is_none() {
+            return Err(ConnectionError::NotConnected.into());
+        }
         let mut events = Vec::new();
-        let mut stream_items = Vec::new();
+        let mut stream_items: Vec<StreamItem> = self.pending_stream_items.drain(..).collect();
         let mut disconnected = false;
 
         {
@@ -489,13 +500,16 @@ impl Client {
 
         // Poll events one by one without filtering, so we don't
         // discard non-BookEvents items (messages, audio, etc.)
+        let mut deferred = Vec::new();
         loop {
             match tokio::time::timeout_at(deadline, con.events().next()).await {
                 Ok(Some(Ok(item))) => {
                     if matches!(item, StreamItem::BookEvents(_)) {
                         break;
                     }
-                    // Other events during connection setup are expected; just skip them
+                    // Keep other events for the next event pump call instead
+                    // of dropping messages/audio from the handshake.
+                    deferred.push(item);
                 }
                 Ok(Some(Err(e))) => {
                     return Err(ConnectionError::ConnectFailed(e.to_string()).into());
@@ -516,6 +530,17 @@ impl Client {
 
         // Update connection state
         self.state = ConnectionState::Connected;
+
+        // Preserve handshake-time events for the next process_events/wait_events
+        // call. Keep the queue bounded so a misbehaving server cannot grow it
+        // without limit.
+        const MAX_PENDING_STREAM_ITEMS: usize = 256;
+        for item in deferred {
+            if self.pending_stream_items.len() >= MAX_PENDING_STREAM_ITEMS {
+                self.pending_stream_items.pop_front();
+            }
+            self.pending_stream_items.push_back(item);
+        }
 
         // Subscribe to all channels so we can see all users
         self.subscribe_all_channels()?;
@@ -1950,6 +1975,7 @@ mod validation_tests {
             self_input_muted: None,
             pending_file_list: None,
             pending_perm_overview: None,
+            pending_stream_items: VecDeque::new(),
             whisper_clients: Vec::new(),
             whisper_channels: Vec::new(),
             audio_sink: None,
