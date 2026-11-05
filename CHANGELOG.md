@@ -15,6 +15,8 @@
 - `Client` 新增 `download_file_with_password`、`upload_file_with_password`、`list_files_with_password`、`delete_file_with_password`、`rename_file_with_password`、`create_directory_with_password`。
 - `Event::Reconnected`，用于区分首次连接与重连恢复。
 - FFI 新增 `tslib_client_wait_connected`、`tslib_client_pump`、文本/状态回调注册。
+- Java `Client` 新增 `waitEvents/sendPoke/getNetworkStats/updateServerVariables/setWhisperTargets/setAudioSink` 与 `AudioSink` 接口。
+- Java `Identity` 新增 `exportTeamSpeakIni`；`OpusCodec` 新增 `decodePlc/setBitrate/setFec/setExpectedPacketLoss`。
 
 ### Changed
 
