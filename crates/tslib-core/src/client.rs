@@ -275,6 +275,14 @@ impl Client {
             options = options.channel(channel.clone());
         }
 
+        // Add channel password if specified
+        if let Some(ref channel_password) = self.config.channel_password {
+            options = options.channel_password(channel_password.clone());
+        }
+
+        // Send the configured hardware id instead of the dependency default.
+        options = options.hardware_id(self.config.hardware_id.clone());
+
         // Connect
         let con = options
             .connect()
@@ -491,8 +499,11 @@ impl Client {
 
         // Hard bound: the embedding drives this on its single native thread —
         // an unresponsive server must not pin that thread forever.
-        const CONNECT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-        let deadline = tokio::time::Instant::now() + CONNECT_WAIT_TIMEOUT;
+        let wait_timeout = self
+            .config
+            .connect_timeout
+            .max(std::time::Duration::from_secs(1));
+        let deadline = tokio::time::Instant::now() + wait_timeout;
 
         // Poll events one by one without filtering, so we don't
         // discard non-BookEvents items (messages, audio, etc.)
