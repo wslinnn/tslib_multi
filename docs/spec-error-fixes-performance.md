@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档状态 | v1.1（已确认；B1 已实现） |
+| 文档状态 | v1.1（已确认；B1 完成，B2 进行中） |
 | 日期 | 2026-11-05 |
 | 适用项目 | `tslib_multi` |
 | 范围 | `tslib-core`、`tslib-audio`、`tslib-chat`、`tslib-channel`、`tslib-bot`、`tslib-jni`、`tslib-ffi`、`tslib-python` |

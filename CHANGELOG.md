@@ -10,6 +10,8 @@
 - `FileTransferConfig`（默认 64 MiB 内存上限、30 s 空闲超时、64 KiB 分块）及 `Client::set_file_transfer_config` / `Client::file_transfer_config`。
 - `FileTransferConfig::unlimited()`，用于显式关闭内存上限与空闲超时。
 - `Error::InvalidArgument`，用于调用方参数校验失败。
+- `AudioError::UnsupportedCodec`，用于非 Opus 频道。
+- Java `Client.moveToChannel(long, String)` 重载，支持频道密码。
 
 ### Changed
 
@@ -20,6 +22,10 @@
 - `wait_connected` 不再丢弃握手期间的非 `BookEvents`，改为缓存到下一次事件泵。
 - `disconnect()` 后所有发送 API 统一返回 `NotConnected`。
 - `send_audio` 与 `set_whisper_targets` 增加帧大小/目标数量校验。
+- `ClientConfig.channel_password`、`hardware_id`、`connect_timeout` 已接线并生效。
+- `Connected` 只在状态同步后发送一次，不再重复。
+- Bot 每轮驱动 `wait_events`；owner-only 使用发送者 UID；插件命令在加载时注册；`BotConfig` 的密码/频道参数传入客户端。
+- `AudioManager` 仅对 Opus Voice/Music（4/5）解码，其他 codec 返回 `UnsupportedCodec`。
 
 ### Fixed
 
@@ -28,6 +34,10 @@
 - 握手期间到达的文本/音频事件被丢弃。
 - 频道 id 大于 `i32::MAX` 时 `Channel.order` 溢出。
 - 断开后仍可能把命令交给残留连接。
+- `Connected` 事件重复发送（第一次 server_name 为空）。
+- Bot 不驱动事件流导致收不到消息；owner-only 永远失败；插件命令未注册。
+- 非 Opus 频道被喂给 Opus 解码器产生噪声。
+- Java `nativeMoveToChannel` 参数个数与 Rust 导出不一致，调用会 `UnsatisfiedLinkError`。
 
 ### Security
 
