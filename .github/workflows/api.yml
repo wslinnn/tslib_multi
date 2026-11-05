@@ -10,6 +10,10 @@ jobs:
   semver:
     name: cargo-semver-checks (${{ matrix.package }})
     runs-on: ubuntu-latest
+    env:
+      # audiopus/opus and speexdsp declare a pre-3.5 cmake minimum; newer
+      # runner images refuse to configure them without this policy override.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     strategy:
       fail-fast: false
       matrix:
@@ -33,8 +37,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
       # Compare each public library crate against the merge base / previous
       # commit. A breaking API change fails the job and must be documented in
