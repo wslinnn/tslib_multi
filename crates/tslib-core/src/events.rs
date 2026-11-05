@@ -5,6 +5,7 @@
 use crate::connection::ConnectionState;
 use crate::state::{Channel, User};
 use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Events that can be emitted by the client
 #[derive(Debug, Clone)]
@@ -105,7 +106,9 @@ pub enum Event {
     AudioReceived {
         user_id: u16,
         codec: AudioCodec,
-        data: Vec<u8>,
+        /// Opus payload. Shared so broadcast subscribers and the returned
+        /// event list reference the same buffer instead of cloning it.
+        data: Arc<[u8]>,
         /// True when the packet arrived as a whisper (VoiceWhisper) packet
         is_whisper: bool,
     },

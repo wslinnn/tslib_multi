@@ -26,6 +26,7 @@
 ### Changed
 
 - `Channel.order` 由 `i32` 改为 `u64`，语义明确为“前驱频道 id”；Java `Channel.order` 同步为 `long`，Python 暴露为 `u64`。
+- `Event::AudioReceived.data` 由 `Vec<u8>` 改为 `Arc<[u8]>`，广播订阅者与返回事件共享同一份音频负载。
 - 频道树按 `channel_order` 前驱链还原兄弟顺序，不再按数值排序；环/缺失前驱按 id 回退。
 - `ChannelTree::add_channel` 每次重建结构，重复/乱序插入不再产生重复节点。
 - 文件传输改为按 chunk 读写、每个 chunk 重置 idle timeout，移除 5 s/10 s 总超时。

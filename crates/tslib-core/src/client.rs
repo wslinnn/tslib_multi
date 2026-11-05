@@ -791,7 +791,7 @@ impl Client {
                     let event = Event::AudioReceived {
                         user_id: from_id,
                         codec: codec_type_to_audio_codec(codec),
-                        data: data.to_vec(),
+                        data: Arc::from(*data),
                         is_whisper,
                     };
                     let _ = self.event_tx.send(event.clone());
