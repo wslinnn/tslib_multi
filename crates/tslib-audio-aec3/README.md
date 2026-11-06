@@ -37,10 +37,10 @@ project 默认值），不改上游任何源文件。
 
 `c/wrapper/aec3_wrapper.cpp` 是几十行的 C ABI shim，直接调
 `webrtc::AudioProcessing`（ProcessReverseStream + ProcessStream，10ms 块）。
-引擎配置只开 AEC3 + 固定 +6dB 采集后置增益（`capture_level_adjustment`
-的 `post_gain_factor`，APM 在全部采集处理之后缩放输出）——NS/AGC/HPF 全关：
-降噪由应用管线（RNNoise）负责，双重处理会让两边都变差；采集维持裸 PCM
-（VOICE_PERFORMANCE），全链路软件处理。
+引擎配置：AEC3 + APM 内建降噪（HIGH 档）+ 固定 +6dB 采集后置增益
+（`capture_level_adjustment` 的 `post_gain_factor`，APM 在全部采集处理之后
+缩放输出）——AGC/HPF 仍关闭。采集维持裸 PCM（VOICE_PERFORMANCE），厂商链
+不参与；应用侧没有独立降噪，因此稳态噪声由 APM 的 NS 承担。
 
 两个增益相关的选型依据（均有 spike 实测数据，见测试）：
 

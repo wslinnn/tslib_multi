@@ -13,9 +13,13 @@
 // real suppression. AGC2 was also evaluated for this slot and rejected: it
 // sits after AEC, scores speech-shaped residual echo as speech, and
 // re-amplifies what AEC3 just removed (measured ERLE collapse in echo-only
-// segments). The rest of the APM chain (NS, AGC1/2, HPF) stays off — noise
-// suppression is owned by the app pipeline (RNNoise), and double processing
-// degrades both stages.
+// segments).
+//
+// Noise suppression runs inside the APM at HIGH: the capture path has no
+// vendor noise suppression at all (VOICE_PERFORMANCE), and the app-side
+// denoiser this wrapper was designed around is not wired up. AGC1/2 and HPF
+// stay off — the fixed post-gain replaces AGC, and the high-pass would only
+// duplicate what the app's send gate already tolerates.
 
 #include "aec3_wrapper.h"
 
@@ -63,7 +67,9 @@ extern "C" void *tslib_aec3_create(int32_t sample_rate) {
     config.capture_level_adjustment.pre_gain_factor = 1.0f;
     config.capture_level_adjustment.post_gain_factor = kTxPostGainFactor;
     config.capture_level_adjustment.analog_mic_gain_emulation.enabled = false;
-    config.noise_suppression.enabled = false;
+    config.noise_suppression.enabled = true;
+    config.noise_suppression.level =
+        webrtc::AudioProcessing::Config::NoiseSuppression::kHigh;
     config.high_pass_filter.enabled = false;
     engine->apm->ApplyConfig(config);
 
