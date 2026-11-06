@@ -23,6 +23,11 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
+      # tslib-audio-aec3 builds the vendored webrtc-audio-processing via
+      # meson+ninja; abseil comes from the committed packagecache (offline).
+      - name: Install meson and ninja
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+
       # Uses the NDK preinstalled on GitHub runners; the glob fallback
       # covers image layout changes
       - name: Build
