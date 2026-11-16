@@ -40,7 +40,7 @@ pub mod resample;
 
 // Re-exports
 pub use capture::{CaptureDevice, CaptureStats, SampleBufferPool};
-pub use codec::{Decoder, Encoder, OpusCodec};
+pub use codec::{Decoder, Encoder, OpusCodec, OpusDecoder};
 pub use config::{AudioConfig, DecoderPoolConfig, EchoCancellation, JitterBufferConfig};
 pub use echo::{EchoEngine, SpeexEchoEngine};
 pub use error::{AudioError, Result};

@@ -254,3 +254,124 @@ pub extern "system" fn Java_dev_tslib_OpusCodec_nativeSetExpectedPacketLoss(
     let handle = ptr_to_opus(ptr);
     audio_to_jni_result(&mut env, handle.encoder.set_expected_packet_loss(percent));
 }
+
+// ---------------------------------------------------------------------------
+// Decoder-only handle (`dev.tslib.OpusDecoder`)
+//
+// The receive side creates one decoder per remote speaker and never encodes.
+// `OpusCodec` builds an encoder and a decoder together, so a server with 100
+// talkers used to allocate 100 idle Opus encoders (each with its own state
+// block) — and each one was created on the audio playback thread when that
+// member joined. This handle carries only what a decoder needs.
+// ---------------------------------------------------------------------------
+
+/// Decoder-only handle: no encoder is ever constructed.
+pub struct OpusDecoderHandle {
+    pub decoder: tslib_audio::codec::OpusDecoder,
+    pub config: tslib_audio::AudioConfig,
+}
+
+fn ptr_to_decoder(ptr: jlong) -> &'static mut OpusDecoderHandle {
+    unsafe { &mut *(ptr as *mut OpusDecoderHandle) }
+}
+
+/// `OpusDecoder()` or `OpusDecoder(config)` — create a decoder-only codec.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_OpusDecoder_nativeCreate(
+    mut env: JNIEnv,
+    _class: JClass,
+    sample_rate: i32,
+    channels: i32,
+    bitrate: i32,
+    frame_size_ms: i32,
+) -> jlong {
+    let mut config = tslib_audio::AudioConfig::default();
+    if sample_rate > 0 {
+        config.sample_rate = sample_rate as u32;
+    }
+    if channels > 0 {
+        config.channels = channels as u16;
+    }
+    if bitrate > 0 {
+        config.bitrate = bitrate as u32;
+    }
+    if frame_size_ms > 0 {
+        config.frame_size_ms = frame_size_ms as u32;
+    }
+
+    let decoder = match audio_to_jni_result(&mut env, tslib_audio::OpusDecoder::new(&config)) {
+        Some(d) => d,
+        None => return 0,
+    };
+
+    Box::into_raw(Box::new(OpusDecoderHandle { decoder, config })) as jlong
+}
+
+/// `OpusDecoder.nativeDestroy(ptr)`
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_OpusDecoder_nativeDestroy(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) {
+    if ptr != 0 {
+        unsafe {
+            drop(Box::from_raw(ptr as *mut OpusDecoderHandle));
+        }
+    }
+}
+
+/// `OpusDecoder.nativeDecode(data, fec)` — decode one packet to 16-bit LE PCM.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_OpusDecoder_nativeDecode<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+    data: JByteArray<'local>,
+    fec: jboolean,
+) -> jni::sys::jbyteArray {
+    let opus_bytes = match env.convert_byte_array(&data) {
+        Ok(b) => b,
+        Err(e) => {
+            throw_tslib_exception(&mut env, &format!("Failed to read Opus array: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let handle = ptr_to_decoder(ptr);
+    let frame_samples = handle.config.frame_size_samples() * handle.config.channels as usize;
+    let mut output = vec![0i16; frame_samples];
+
+    let len = match audio_to_jni_result(
+        &mut env,
+        if fec != 0 {
+            handle.decoder.decode_with_fec(&opus_bytes, &mut output)
+        } else {
+            handle.decoder.decode(&opus_bytes, &mut output)
+        },
+    ) {
+        Some(l) => l,
+        None => return std::ptr::null_mut(),
+    };
+
+    i16_slice_to_jbyte_array(&mut env, &output[..len])
+}
+
+/// `OpusDecoder.nativeDecodePlc()` — one concealed frame for a lost packet.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_OpusDecoder_nativeDecodePlc<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+) -> jni::sys::jbyteArray {
+    let handle = ptr_to_decoder(ptr);
+    let frame_samples = handle.config.frame_size_samples() * handle.config.channels as usize;
+    let mut output = vec![0i16; frame_samples];
+
+    let len = match audio_to_jni_result(&mut env, handle.decoder.decode_plc(&mut output)) {
+        Some(l) => l,
+        None => return std::ptr::null_mut(),
+    };
+
+    i16_slice_to_jbyte_array(&mut env, &output[..len])
+}

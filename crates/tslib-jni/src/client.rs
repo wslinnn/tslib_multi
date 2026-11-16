@@ -349,6 +349,22 @@ pub extern "system" fn Java_dev_tslib_Client_nativeGetState(
     }
 }
 
+/// `Client.nativeGetViewRevision(ptr)` — the native view's revision counter.
+///
+/// Embedders poll this to skip a full roster rebuild when nothing changed. It
+/// moves only when users/channels/server info actually change — not for chat
+/// messages, pokes or talk-status flips, which used to invalidate the view and
+/// make every embedder re-serialise the whole roster on the audio thread.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tslib_Client_nativeGetViewRevision(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jlong {
+    let handle = ptr_to_handle(ptr);
+    handle.client.view_revision() as jlong
+}
+
 /// `Client.getClientId()` — returns `Integer` or null.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tslib_Client_nativeGetClientId(

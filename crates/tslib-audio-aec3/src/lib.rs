@@ -26,7 +26,12 @@ use tslib_audio::echo::{EchoEngine, sanitize_echo_output};
 use tslib_audio::error::{AudioError, Result};
 
 extern "C" {
+    // The fixed-level entry point is still exported for ABI compatibility with
+    // older builds of this crate; every path here now goes through the
+    // configurable one (which defaults to the same HIGH level).
+    #[allow(dead_code)]
     fn tslib_aec3_create(sample_rate: i32) -> *mut c_void;
+    fn tslib_aec3_create_with_config(sample_rate: i32, ns_level: i32) -> *mut c_void;
     fn tslib_aec3_process_render(handle: *mut c_void, far_ref: *const i16, samples: i32) -> i32;
     fn tslib_aec3_process_capture(
         handle: *mut c_void,
@@ -47,6 +52,33 @@ pub struct Aec3EchoEngine {
     chunk_samples: usize, // 10 ms — AEC3's native chunk
     post_gain: f32,       // fixed output gain applied inside the APM after AEC
     zeroed_frames: u64,   // frames the blow-up guard zeroed (diagnostic counter)
+    ns_level: i32,        // noise-suppression level, kept for reset()
+}
+
+/// Noise-suppression level for [`Aec3EchoEngine`].
+///
+/// The default is `High` — the level this engine has always used. A device
+/// where high suppression dulls weak consonants can be dialled back without a
+/// rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoiseSuppressionLevel {
+    Low,
+    Moderate,
+    #[default]
+    High,
+    VeryHigh,
+}
+
+impl NoiseSuppressionLevel {
+    /// Raw value understood by the C wrapper.
+    pub fn as_raw(self) -> i32 {
+        match self {
+            Self::Low => 0,
+            Self::Moderate => 1,
+            Self::High => 2,
+            Self::VeryHigh => 3,
+        }
+    }
 }
 
 // Same exclusivity argument as the speex engine: the raw handle is only ever
@@ -58,6 +90,15 @@ impl Aec3EchoEngine {
     /// frames (must be a multiple of the 10 ms chunk). `tail_samples` is
     /// accepted but unused — see the crate docs.
     pub fn new(sample_rate: u32, frame_samples: usize, _tail_samples: usize) -> Result<Self> {
+        Self::with_noise_suppression(sample_rate, frame_samples, NoiseSuppressionLevel::default())
+    }
+
+    /// Create an engine with an explicit noise-suppression level.
+    pub fn with_noise_suppression(
+        sample_rate: u32,
+        frame_samples: usize,
+        ns_level: NoiseSuppressionLevel,
+    ) -> Result<Self> {
         if !matches!(sample_rate, 16_000 | 32_000 | 48_000) {
             return Err(AudioError::InvalidConfig(format!(
                 "aec3 engine: sample_rate {sample_rate} not in 16k/32k/48k"
@@ -69,7 +110,7 @@ impl Aec3EchoEngine {
                 "aec3 engine: frame_samples {frame_samples} must be a non-zero multiple of the 10 ms chunk ({chunk_samples})"
             )));
         }
-        let handle = unsafe { tslib_aec3_create(sample_rate as i32) };
+        let handle = unsafe { tslib_aec3_create_with_config(sample_rate as i32, ns_level.as_raw()) };
         if handle.is_null() {
             return Err(AudioError::DeviceInit(
                 "tslib_aec3_create returned null".to_string(),
@@ -82,6 +123,7 @@ impl Aec3EchoEngine {
             chunk_samples,
             post_gain: unsafe { tslib_aec3_post_gain() },
             zeroed_frames: 0,
+            ns_level: ns_level.as_raw(),
         })
     }
 
@@ -158,7 +200,8 @@ impl EchoEngine for Aec3EchoEngine {
     /// path only runs on route changes / session restarts).
     fn reset(&mut self) -> Result<()> {
         unsafe { tslib_aec3_destroy(self.handle) };
-        self.handle = unsafe { tslib_aec3_create(self.sample_rate as i32) };
+        self.handle =
+            unsafe { tslib_aec3_create_with_config(self.sample_rate as i32, self.ns_level) };
         if self.handle.is_null() {
             return Err(AudioError::DeviceInit(
                 "tslib_aec3_create returned null on reset".to_string(),
@@ -196,6 +239,41 @@ mod tests {
         assert_eq!(engine.process(&mic, &far, &mut out).unwrap(), N);
         engine.reset().expect("reset");
         assert_eq!(engine.process(&mic, &far, &mut out).unwrap(), N);
+    }
+
+    /// Every noise-suppression level must produce a working engine: the level
+    /// only changes how hard the suppressor works, never whether the pipeline
+    /// runs. `reset()` has to keep the chosen level too.
+    #[test]
+    fn every_noise_suppression_level_builds_and_survives_reset() {
+        const N: usize = 960;
+        for level in [
+            NoiseSuppressionLevel::Low,
+            NoiseSuppressionLevel::Moderate,
+            NoiseSuppressionLevel::High,
+            NoiseSuppressionLevel::VeryHigh,
+        ] {
+            let mut engine = Aec3EchoEngine::with_noise_suppression(48_000, N, level)
+                .unwrap_or_else(|e| panic!("{level:?} should create: {e}"));
+            let mic = vec![100i16; N];
+            let far = vec![50i16; N];
+            let mut out = vec![0i16; N];
+            assert_eq!(engine.process(&mic, &far, &mut out).unwrap(), N);
+            engine.reset().expect("reset keeps the level");
+            assert_eq!(engine.process(&mic, &far, &mut out).unwrap(), N);
+        }
+    }
+
+    /// The raw values are the contract with the C wrapper's switch.
+    #[test]
+    fn noise_suppression_raw_values_are_stable() {
+        assert_eq!(NoiseSuppressionLevel::Low.as_raw(), 0);
+        assert_eq!(NoiseSuppressionLevel::Moderate.as_raw(), 1);
+        assert_eq!(NoiseSuppressionLevel::High.as_raw(), 2);
+        assert_eq!(NoiseSuppressionLevel::VeryHigh.as_raw(), 3);
+        // The default must stay High: that is the behaviour existing callers
+        // (and the fixed-level C entry point) already have.
+        assert_eq!(NoiseSuppressionLevel::default(), NoiseSuppressionLevel::High);
     }
 
     /// Contract the app relies on for the headset case: with a silent far

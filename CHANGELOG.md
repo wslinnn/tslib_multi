@@ -3,6 +3,27 @@
 本项目在 `0.x` 期间遵循“minor 可包含破坏性变更、patch 不破坏”的原则。  
 公开 API 的旧/新对照与迁移片段见 [`docs/api-changes/`](docs/api-changes/README.md)。
 
+## [0.2.1] - 2026-11-16
+
+### Added
+
+- `Client::view_revision()`：只读的视图版本号，供嵌入方在轮询名册前短路（避免无变化时重新序列化全部用户/频道）。Java `Client.getViewRevision()`。
+- `NoiseSuppressionLevel`（`Low`/`Moderate`/`High`/`VeryHigh`）与 `Aec3EchoEngine::with_noise_suppression`；`Aec3EchoEngine::new` 行为不变（HIGH）。
+- Java `OpusDecoder`：仅解码器的句柄，接收侧每个远端说话者一个，不再顺带分配闲置编码器。新增 JNI 符号 `nativeCreate/nativeDestroy/nativeDecode/nativeDecodePlc`。
+- Java `EchoCanceller(sampleRate, frameSamples, tailSamples, nsLevel)` 重载与 JNI `nativeCreateWithNoiseSuppression`；三参构造器行为不变。
+
+### Changed
+
+- **视图失效粒度收窄**：`ViewChanged` / `ViewReady` 的 revision 现在只在用户、频道或服务器信息真正变化时递增。此前 pump 内产生任意事件（聊天消息、poke、文件传输进度、talk 状态翻转）都会让 revision +1，导致下游把整份名册通过绑定层重新序列化一次——talk 翻转以音频速率发生，是其中代价最高的一项。
+- `Aec3EchoEngine::reset()` 重建时沿用创建时选择的噪声抑制档位，不再固定回 HIGH。
+
+### Notes
+
+- `User::is_talking` 仍会写入快照，但不再单独触发视图失效；需要实时说话状态的嵌入方应消费 `TalkStatusStart` / `TalkStatusStop`，不要依赖快照里该字段的时效性。
+- C wrapper 新增 `tslib_aec3_create_with_config(sample_rate, ns_level)`；`tslib_aec3_create` 保留且等价于 `ns_level = 2`（HIGH）。
+- 未改动 `tslib-python`、`tslib-ffi`。
+- 迁移说明见 [`docs/api-changes/v0.2.1.md`](docs/api-changes/v0.2.1.md)。
+
 ## [0.2.0] - 未发布
 
 ### Added

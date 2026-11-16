@@ -9,8 +9,16 @@ extern "C" {
 
 /* Create one AEC3 canceller for `sample_rate` (16000/32000/48000 only).
  * Returns an opaque handle, or NULL on failure. One instance per capture
- * session; all calls must come from a single thread. */
+ * session; all calls must come from a single thread.
+ *
+ * Uses the default noise-suppression level (HIGH). */
 void *tslib_aec3_create(int32_t sample_rate);
+
+/* Same, with the noise-suppression level selectable: 0=low, 1=moderate,
+ * 2=high (default), 3=very high; out-of-range values fall back to high.
+ * Everything else (AEC3, fixed +6 dB post-gain) is identical to
+ * tslib_aec3_create. */
+void *tslib_aec3_create_with_config(int32_t sample_rate, int32_t ns_level);
 
 /* Feed the 10 ms playback chunk the speaker is emitting now (reference for
  * the delay estimator). `samples` must equal sample_rate/100. Returns 0 on

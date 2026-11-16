@@ -489,6 +489,14 @@ pub struct Client {
     view_dirty: bool,
     /// The initial view-ready event is pending
     view_ready_pending: bool,
+    /// Something the view actually exposes (users, channels, server info)
+    /// changed during this pump and has not invalidated the snapshots yet.
+    ///
+    /// Deliberately *not* set by talk-status flips: those arrive at audio
+    /// rate, and rebuilding the whole roster for each one is the expensive
+    /// part of the pump. Embedders that need live talk state learn it from
+    /// `TalkStatusStart`/`TalkStatusStop` events, which are still emitted.
+    view_state_dirty: bool,
 }
 
 impl Client {
@@ -531,6 +539,7 @@ impl Client {
             view_revision: 0,
             view_dirty: false,
             view_ready_pending: false,
+            view_state_dirty: false,
         };
 
         // Establish connection
@@ -756,8 +765,21 @@ impl Client {
     }
 
     fn finish_pump(&mut self, started: Instant, events: &mut Vec<Event>) {
-        if !events.is_empty() {
-            self.invalidate_snapshots();
+        // Only a real change to what the view exposes bumps the revision.
+        //
+        // This used to fire whenever *any* event was produced, so a chat
+        // message, a poke or a file-transfer step made every embedder
+        // re-serialise the whole roster through the bindings — on the same
+        // thread that feeds outgoing audio. Talk-status flips were the worst
+        // of those: they arrive at audio rate.
+        if self.view_state_dirty {
+            self.view_state_dirty = false;
+            // `invalidate_snapshots` is idempotent for the revision (one bump
+            // per pump) but a change point that already invalidated set
+            // `view_dirty`, so only bump when that has not happened yet.
+            if !self.view_dirty {
+                self.invalidate_snapshots();
+            }
         }
         if self.view_ready_pending {
             events.push(Event::ViewReady {
@@ -827,6 +849,8 @@ impl Client {
             self.talking_users.remove(&user_id);
 
             debug!("User {} stopped talking", user_id);
+            // Deliberately not a view-state change: talk status flips at audio
+            // rate. Embedders get these as TalkStatusStop events.
             if let Some(user) = self.server_state.users.get_mut(&user_id) {
                 user.is_talking = false;
             }
@@ -1405,6 +1429,7 @@ impl Client {
                 if let Some(ts_client) = state.clients.get(client_id) {
                     let user = ts_client_to_user(ts_client);
                     self.server_state.users.insert(user.id, user.clone());
+                    self.mark_view_state_dirty();
                     info!("User joined: {} ({})", user.nickname, user.id);
                     return Some(Event::UserJoined { user });
                 }
@@ -1420,6 +1445,7 @@ impl Client {
                         }
                     }
                     self.server_state.channels.insert(channel.id, channel.clone());
+                    self.mark_view_state_dirty();
                     info!("Channel created: {} ({})", channel.name, channel.id);
                     return Some(Event::ChannelCreated { channel });
                 }
@@ -1446,6 +1472,8 @@ impl Client {
                         .unwrap_or(0);
 
                     self.server_state.users.insert(user.id, user.clone());
+                    // A channel move changes what the roster shows
+                    self.mark_view_state_dirty();
 
                     if Some(user.id) == self.client_id {
                         self.channel_id = Some(user.channel_id);
@@ -1480,6 +1508,7 @@ impl Client {
                     let mut user = ts_client_to_user(ts_client);
                     user.is_talking = self.talking_users.contains_key(&user.id);
                     self.server_state.users.insert(user.id, user.clone());
+                    self.mark_view_state_dirty();
                     return Some(Event::UserUpdated { user });
                 }
             }
@@ -1498,6 +1527,7 @@ impl Client {
                         }
                     }
                     self.server_state.channels.insert(channel.id, channel.clone());
+                    self.mark_view_state_dirty();
                     return Some(Event::ChannelEdited { channel });
                 }
             }
@@ -1518,6 +1548,7 @@ impl Client {
             PropertyId::Client(client_id) => {
                 // Client disconnected, kicked, or banned.
                 if let Some(user) = self.server_state.users.remove(&client_id.0) {
+                    self.mark_view_state_dirty();
                     info!("User left: {} ({})", user.nickname, user.id);
                     let reason_text = reason
                         .map(|reason| format!("{reason:?}"))
@@ -1565,6 +1596,7 @@ impl Client {
             PropertyId::Channel(channel_id) => {
                 // Channel deleted
                 if self.server_state.channels.remove(&channel_id.0).is_some() {
+                    self.mark_view_state_dirty();
                     info!("Channel deleted: {}", channel_id.0);
                     return Some(Event::ChannelDeleted {
                         channel_id: channel_id.0,
@@ -1783,6 +1815,7 @@ impl Client {
                     hints.bits,
                     pending.perms.len()
                 );
+                self.mark_view_state_dirty();
                 if let Some(ch) = self.server_state.channels.get_mut(&pending.channel_id) {
                     ch.permission_hints = hints.bits;
                     ch.permission_hints_known = hints.known;
@@ -1969,6 +2002,7 @@ impl Client {
                                     "permoverview failed for channel {}, hints unknown",
                                     pending.channel_id
                                 );
+                                self.mark_view_state_dirty();
                                 let hints = PermissionHints::UNKNOWN;
                                 if let Some(ch) =
                                     self.server_state.channels.get_mut(&pending.channel_id)
@@ -2192,6 +2226,16 @@ impl Client {
         self.channels_snapshot = None;
         self.view_revision = self.view_revision.wrapping_add(1);
         self.view_dirty = true;
+    }
+
+    /// Note that users/channels/server info changed, so the pump must announce
+    /// a new view revision when it finishes.
+    ///
+    /// Live talk status is intentionally *not* a reason: it changes at audio
+    /// rate and embedding code that needs it consumes the talk events. This
+    /// keeps the expensive snapshot rebuild tied to roster changes.
+    fn mark_view_state_dirty(&mut self) {
+        self.view_state_dirty = true;
     }
 
     /// Revisioned snapshot of server, users and channels.
@@ -3782,6 +3826,70 @@ mod validation_tests {
         assert_eq!(view.revision, client.view_revision());
     }
 
+    /// A talk-status flip must not bump the view revision: it happens at audio
+    /// rate, and rebuilding the whole roster for it is what made the pump
+    /// re-serialise every user whenever somebody spoke.
+    #[test]
+    fn talk_status_does_not_bump_the_view_revision() {
+        let mut client = disconnected_client();
+        let before = client.view_revision();
+
+        // Talk events alone, repeatedly: never a bump.
+        for _ in 0..50 {
+            let mut talk_events = vec![
+                Event::TalkStatusStart {
+                    user_id: 7,
+                    is_whisper: false,
+                },
+                Event::TalkStatusStop { user_id: 7 },
+            ];
+            client.finish_pump(Instant::now(), &mut talk_events);
+        }
+        assert_eq!(client.view_revision(), before);
+    }
+
+    /// The regression this protects: any event used to invalidate the view, so
+    /// a chat message forced a full roster rebuild in the embedder.
+    #[test]
+    fn non_roster_events_do_not_bump_the_view_revision() {
+        let mut client = disconnected_client();
+        let before = client.view_revision();
+
+        let mut chat = vec![Event::TextMessage {
+            sender_id: 3,
+            sender_name: "alice".to_string(),
+            message: "hello".to_string(),
+            target: crate::events::MessageTarget::Channel,
+            target_id: Some(1),
+        }];
+        client.finish_pump(Instant::now(), &mut chat);
+        assert_eq!(client.view_revision(), before);
+
+        let mut poke = vec![Event::Poked {
+            poker_id: 3,
+            poker_name: "alice".to_string(),
+            message: "poke".to_string(),
+        }];
+        client.finish_pump(Instant::now(), &mut poke);
+        assert_eq!(client.view_revision(), before);
+    }
+
+    /// A roster change still has to invalidate, exactly once per pump.
+    #[test]
+    fn roster_change_bumps_the_view_revision_once() {
+        let mut client = disconnected_client();
+        let before = client.view_revision();
+        client.mark_view_state_dirty();
+        // Two marks in the same pump still mean one bump
+        client.mark_view_state_dirty();
+        client.finish_pump(Instant::now(), &mut Vec::new());
+        assert_eq!(client.view_revision(), before.wrapping_add(1));
+
+        // …and the flag is consumed, so the next empty pump does not bump
+        client.finish_pump(Instant::now(), &mut Vec::new());
+        assert_eq!(client.view_revision(), before.wrapping_add(1));
+    }
+
     #[test]
     fn pump_stats_record_duration_and_events() {
         let mut client = disconnected_client();
@@ -3932,6 +4040,7 @@ mod validation_tests {
             view_revision: 0,
             view_dirty: false,
             view_ready_pending: false,
+            view_state_dirty: false,
         }
     }
 

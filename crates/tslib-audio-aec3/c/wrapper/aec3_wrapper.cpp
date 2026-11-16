@@ -15,11 +15,24 @@
 // re-amplifies what AEC3 just removed (measured ERLE collapse in echo-only
 // segments).
 //
-// Noise suppression runs inside the APM at HIGH: the capture path has no
-// vendor noise suppression at all (VOICE_PERFORMANCE), and the app-side
-// denoiser this wrapper was designed around is not wired up. AGC1/2 and HPF
-// stay off — the fixed post-gain replaces AGC, and the high-pass would only
-// duplicate what the app's send gate already tolerates.
+// Noise suppression runs inside the APM; the capture path has no vendor noise
+// suppression at all (VOICE_PERFORMANCE). AGC1/2 stay off — the fixed post-gain
+// replaces AGC.
+//
+// High-pass filtering is NOT off, despite what `config.high_pass_filter` says:
+// AEC3 forces it on for every full-band, non-mobile session
+// (`enforce_high_pass_filtering` defaults to true in the APM config, and
+// `InitializeHighPassFilter` builds the filter for AEC regardless of
+// `high_pass_filter.enabled`). The APM applies it to the capture buffer before
+// the echo canceller, so the rumble/DC rejection the "enable HPF" suggestion
+// asks for is already in the chain. Setting the flag would only add a second,
+// redundant filter stage; leaving it false keeps one HPF in the path.
+//
+// NS defaults to HIGH because the raw capture path carries the full noise
+// floor into AEC. It is now selectable per session (see
+// `tslib_aec3_create_with_config`) so a device where HIGH dulls weak
+// consonants can be dialled back without a rebuild; HIGH stays the default so
+// existing callers keep today's behaviour exactly.
 
 #include "aec3_wrapper.h"
 
@@ -45,13 +58,33 @@ struct Engine {
     std::vector<int16_t> render_dst;
 };
 
+// Map the wrapper's NS level (0=low 1=moderate 2=high 3=very high) onto the
+// APM enum. Out-of-range values fall back to HIGH rather than silently
+// disabling suppression.
+webrtc::AudioProcessing::Config::NoiseSuppression::Level NsLevelFromInt(
+    int32_t level) {
+    using Ns = webrtc::AudioProcessing::Config::NoiseSuppression;
+    switch (level) {
+        case 0:
+            return Ns::kLow;
+        case 1:
+            return Ns::kModerate;
+        case 3:
+            return Ns::kVeryHigh;
+        case 2:
+        default:
+            return Ns::kHigh;
+    }
+}
+
 }  // namespace
 
 extern "C" float tslib_aec3_post_gain(void) {
     return kTxPostGainFactor;
 }
 
-extern "C" void *tslib_aec3_create(int32_t sample_rate) {
+extern "C" void *tslib_aec3_create_with_config(int32_t sample_rate,
+                                               int32_t ns_level) {
     if (sample_rate != 16000 && sample_rate != 32000 && sample_rate != 48000) {
         return nullptr;
     }
@@ -68,8 +101,10 @@ extern "C" void *tslib_aec3_create(int32_t sample_rate) {
     config.capture_level_adjustment.post_gain_factor = kTxPostGainFactor;
     config.capture_level_adjustment.analog_mic_gain_emulation.enabled = false;
     config.noise_suppression.enabled = true;
-    config.noise_suppression.level =
-        webrtc::AudioProcessing::Config::NoiseSuppression::kHigh;
+    config.noise_suppression.level = NsLevelFromInt(ns_level);
+    // Left off on purpose: AEC3 already builds and applies its own HPF for
+    // full-band sessions (see the header comment). Enabling this would add a
+    // second stage on top of it.
     config.high_pass_filter.enabled = false;
     engine->apm->ApplyConfig(config);
 
@@ -78,6 +113,11 @@ extern "C" void *tslib_aec3_create(int32_t sample_rate) {
     engine->render_src.assign(frames, 0);
     engine->render_dst.assign(frames, 0);
     return engine.release();
+}
+
+extern "C" void *tslib_aec3_create(int32_t sample_rate) {
+    // ns_level 2 == kHigh: the historical behaviour, byte for byte.
+    return tslib_aec3_create_with_config(sample_rate, 2);
 }
 
 extern "C" int32_t tslib_aec3_process_render(void *handle,
