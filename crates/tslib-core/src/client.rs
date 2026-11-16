@@ -1461,6 +1461,9 @@ impl Client {
     fn handle_property_changed(&mut self, id: &PropertyId, _old: &tsclientlib::events::PropertyValue) -> Option<Event> {
         let con = self.connection.as_ref()?;
         let state = con.get_state().ok()?;
+        // Set by the catch-all arm below; the mark is applied after the match
+        // so that `&mut self` is not needed while `state` is still borrowed.
+        let mut unhandled = false;
 
         match id {
             PropertyId::ClientChannel(client_id) => {
@@ -1542,7 +1545,21 @@ impl Client {
                     return Some(Event::ChannelEdited { channel: edited });
                 }
             }
-            _ => {}
+            _ => {
+                // Any property we do not model explicitly can still change
+                // what the view exposes: channel parent/order (tree shape),
+                // icon, password flag, server online-count and uptime. The
+                // view used to be invalidated by the pump on any event, which
+                // covered these by accident; now that the pump only reacts to
+                // explicit marks, they have to be marked here.
+                //
+                // A flag rather than a direct call: `state` above still holds
+                // a borrow of `self`, and the mark needs `&mut self`.
+                unhandled = true;
+            }
+        }
+        if unhandled {
+            self.mark_view_state_dirty();
         }
         None
     }
@@ -1614,7 +1631,11 @@ impl Client {
                     });
                 }
             }
-            _ => {}
+            _ => {
+                // Same reasoning as handle_property_changed: an unmodelled
+                // property disappearing still changes the view.
+                self.mark_view_state_dirty();
+            }
         }
         None
     }
@@ -2198,8 +2219,16 @@ impl Client {
 
     /// Get all users from tsclientlib state as a shared snapshot.
     ///
-    /// The snapshot is rebuilt after an event pump or a state mutation, so
-    /// repeated UI reads in one frame share a single allocation.
+    /// The snapshot is rebuilt when the view is invalidated — that is, when
+    /// the roster itself (users, channels, server info) changed — so repeated
+    /// UI reads share a single allocation.
+    ///
+    /// **`User::is_talking` in the snapshot is not live.** It is captured
+    /// when the snapshot is built, and talk-status flips deliberately do not
+    /// invalidate the view (they happen at audio rate). A consumer that needs
+    /// who-is-speaking right now must track `TalkStatusStart` /
+    /// `TalkStatusStop`; treating this field as current leaves a user shown as
+    /// talking until the next roster change.
     pub fn users(&mut self) -> Arc<[User]> {
         if let Some(snapshot) = &self.users_snapshot {
             return Arc::clone(snapshot);

@@ -3,6 +3,13 @@
 本项目在 `0.x` 期间遵循“minor 可包含破坏性变更、patch 不破坏”的原则。  
 公开 API 的旧/新对照与迁移片段见 [`docs/api-changes/`](docs/api-changes/README.md)。
 
+## [0.2.2] - 2026-11-16
+
+### Fixed
+
+- **未建模属性变化不再被丢弃**：`handle_property_changed` / `handle_property_removed` 的兜底分支现在会标记视图变脏。频道父级与排序（频道树结构）、频道图标、密码标志，以及服务器在线人数与运行时长等属性此前不产生事件也不触发失效，在视图失效改为显式打标后这些变化不会再传到嵌入方。
+- `Client::users()` 的文档补充说明：快照中的 `User::is_talking` 是构建快照那一刻的值，不是实时状态；需要实时说话状态应消费 `TalkStatusStart` / `TalkStatusStop`。
+
 ## [0.2.1] - 2026-11-16
 
 ### Added
