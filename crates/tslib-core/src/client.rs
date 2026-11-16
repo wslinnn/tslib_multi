@@ -1428,10 +1428,11 @@ impl Client {
                 // New client connected
                 if let Some(ts_client) = state.clients.get(client_id) {
                     let user = ts_client_to_user(ts_client);
-                    self.server_state.users.insert(user.id, user.clone());
+                    let joined = user;
+                    self.server_state.users.insert(joined.id, joined.clone());
                     self.mark_view_state_dirty();
-                    info!("User joined: {} ({})", user.nickname, user.id);
-                    return Some(Event::UserJoined { user });
+                    info!("User joined: {} ({})", joined.nickname, joined.id);
+                    return Some(Event::UserJoined { user: joined });
                 }
             }
             PropertyId::Channel(channel_id) => {
@@ -1444,10 +1445,11 @@ impl Client {
                             channel.permission_hints = existing.permission_hints;
                         }
                     }
-                    self.server_state.channels.insert(channel.id, channel.clone());
+                    let created = channel;
+                    self.server_state.channels.insert(created.id, created.clone());
                     self.mark_view_state_dirty();
-                    info!("Channel created: {} ({})", channel.name, channel.id);
-                    return Some(Event::ChannelCreated { channel });
+                    info!("Channel created: {} ({})", created.name, created.id);
+                    return Some(Event::ChannelCreated { channel: created });
                 }
             }
             _ => {}
@@ -1466,6 +1468,10 @@ impl Client {
                 if let Some(ts_client) = state.clients.get(client_id) {
                     let mut user = ts_client_to_user(ts_client);
                     user.is_talking = self.talking_users.contains_key(&user.id);
+                    // Copied out before touching `self` mutably: keeping the
+                    // borrow on `self.connection` alive across the mutation
+                    // below would not compile.
+                    let to_channel = ts_client.channel.0;
                     let from_channel = self.server_state.users
                         .get(&user.id)
                         .map(|u| u.channel_id)
@@ -1491,7 +1497,7 @@ impl Client {
                         return Some(Event::UserMoved {
                             user,
                             from_channel,
-                            to_channel: ts_client.channel.0,
+                            to_channel,
                         });
                     }
                 }
@@ -1507,9 +1513,13 @@ impl Client {
                 if let Some(ts_client) = state.clients.get(client_id) {
                     let mut user = ts_client_to_user(ts_client);
                     user.is_talking = self.talking_users.contains_key(&user.id);
-                    self.server_state.users.insert(user.id, user.clone());
+                    // `user` is owned from here on, so the borrow of
+                    // `self.connection` ends and the mutation below is free to
+                    // take `&mut self`.
+                    let updated = user;
+                    self.server_state.users.insert(updated.id, updated.clone());
                     self.mark_view_state_dirty();
-                    return Some(Event::UserUpdated { user });
+                    return Some(Event::UserUpdated { user: updated });
                 }
             }
             PropertyId::ChannelName(channel_id) |
@@ -1526,9 +1536,10 @@ impl Client {
                             channel.permission_hints = existing.permission_hints;
                         }
                     }
-                    self.server_state.channels.insert(channel.id, channel.clone());
+                    let edited = channel;
+                    self.server_state.channels.insert(edited.id, edited.clone());
                     self.mark_view_state_dirty();
-                    return Some(Event::ChannelEdited { channel });
+                    return Some(Event::ChannelEdited { channel: edited });
                 }
             }
             _ => {}
